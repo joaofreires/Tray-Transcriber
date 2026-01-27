@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import importlib
+import json
+import os
+import threading
+import tempfile
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import whisperx
+
+
+model_cache = {}
+model_lock = threading.Lock()
+last_error = None
+last_load_model = None
+last_load_ms = None
+last_transcribe_ms = None
+loading_model = None
+loading_started_at = None
+whisper_module = None
+
+
+def resolve_device(device):
+    if not device or device == "default":
+        try:
+            import torch  # type: ignore
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if device == "gpu":
+        return "cuda"
+    if device == "cuda":
+        return "cuda"
+    if device == "cpu":
+        return "cpu"
+    return device
+
+
+def load_model_cached(model_name, device, compute_type, language, engine):
+    resolved_device = resolve_device(device)
+    key = f"{engine}|{model_name}|{resolved_device}|{compute_type}|{language or ''}"
+    if key in model_cache:
+        return model_cache[key]
+    start = time.time()
+    print(
+        f"[worker] loading engine={engine} model={model_name} device={resolved_device} compute={compute_type} lang={language}",
+        flush=True,
+    )
+    global last_error, last_load_model, last_load_ms, loading_model, loading_started_at
+    loading_model = key
+    loading_started_at = start
+    try:
+        if engine == "whisper":
+            global whisper_module
+            if whisper_module is None:
+                whisper_module = importlib.import_module("whisper")
+            if not hasattr(whisper_module, "load_model"):
+                module_path = getattr(whisper_module, "__file__", "unknown")
+                raise RuntimeError(
+                    f"whisper module missing load_model (module path: {module_path}). "
+                    "Install OpenAI Whisper: pip install -U openai-whisper"
+                )
+            model = whisper_module.load_model(model_name, device=resolved_device)
+        elif engine == "faster-whisper":
+            try:
+                faster_whisper = importlib.import_module("faster_whisper")
+            except Exception as exc:
+                raise RuntimeError(
+                    "faster-whisper not installed. Install with: pip install -U faster-whisper"
+                ) from exc
+            model = faster_whisper.WhisperModel(model_name, device=resolved_device, compute_type=compute_type)
+        else:
+            model = whisperx.load_model(model_name, device=resolved_device, compute_type=compute_type, language=language)
+    except Exception as exc:
+        last_error = f"model load failed: {exc}"
+        print(f"[worker] model load error: {exc}", flush=True)
+        loading_model = None
+        loading_started_at = None
+        raise
+    elapsed_ms = int((time.time() - start) * 1000)
+    last_load_model = key
+    last_load_ms = elapsed_ms
+    loading_model = None
+    loading_started_at = None
+    print(f"[worker] model loaded engine={engine} model={model_name} device={resolved_device} ms={elapsed_ms}", flush=True)
+    model_cache[key] = model
+    return model
+
+
+class WhisperXHandler(BaseHTTPRequestHandler):
+    def _json_response(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._json_response(200, {"ok": True})
+            return
+        if self.path == "/status":
+            self._json_response(
+                200,
+                {
+                    "ok": True,
+                    "cached_models": list(model_cache.keys()),
+                    "last_error": last_error,
+                    "last_load_model": last_load_model,
+                    "last_load_ms": last_load_ms,
+                    "last_transcribe_ms": last_transcribe_ms,
+                    "loading_model": loading_model,
+                    "loading_elapsed_ms": int((time.time() - loading_started_at) * 1000) if loading_started_at else None,
+                },
+            )
+            return
+        self._json_response(404, {"error": "not found"})
+
+    def do_POST(self):
+        if self.path != "/transcribe":
+            if self.path == "/warmup":
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0:
+                    self._json_response(400, {"error": "empty body"})
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except Exception as exc:
+                    self._json_response(400, {"error": f"invalid json: {exc}"})
+                    return
+                engine = payload.get("engine", "whisperx")
+                model_name = payload.get("model", "small")
+                language = payload.get("language")
+                compute_type = payload.get("compute_type", "int8")
+                device = resolve_device(payload.get("device", "default"))
+                with model_lock:
+                    try:
+                        load_model_cached(model_name, device, compute_type, language, engine)
+                    except Exception as exc:
+                        self._json_response(500, {"error": f"model load failed: {exc}"})
+                        return
+                self._json_response(200, {"ok": True})
+                return
+            self._json_response(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self._json_response(400, {"error": "empty body"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            self._json_response(400, {"error": f"invalid json: {exc}"})
+            return
+
+        audio_b64 = payload.get("audio_base64")
+        if not audio_b64:
+            self._json_response(400, {"error": "missing audio_base64"})
+            return
+
+        engine = payload.get("engine", "whisperx")
+        model_name = payload.get("model", "small")
+        language = payload.get("language")
+        compute_type = payload.get("compute_type", "int8")
+        batch_size = int(payload.get("batch_size", 4))
+        initial_prompt = payload.get("initial_prompt")
+        device = resolve_device(payload.get("device", "default"))
+        no_align = bool(payload.get("no_align", True))
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as exc:
+            self._json_response(400, {"error": f"invalid base64: {exc}"})
+            return
+
+        with model_lock:
+            try:
+                model = load_model_cached(model_name, device, compute_type, language, engine)
+            except Exception as exc:
+                self._json_response(500, {"error": f"model load failed: {exc}"})
+                return
+
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=payload.get("extension", ".webm"))
+            try:
+                tmp_file.write(audio_bytes)
+                tmp_file.flush()
+                tmp_path = tmp_file.name
+            finally:
+                tmp_file.close()
+
+            try:
+                start_time = time.time()
+                print(
+                    f"[worker] transcribe start engine={engine} model={model_name} device={device} lang={language} compute={compute_type} bytes={len(audio_bytes)}",
+                    flush=True,
+                )
+                audio = whisperx.load_audio(tmp_path)
+                if engine == "whisper":
+                    kwargs = {
+                        "language": language,
+                        "initial_prompt": initial_prompt,
+                        "fp16": device != "cpu",
+                    }
+                    kwargs = {k: v for k, v in kwargs.items() if v is not None and v != ""}
+                    result = model.transcribe(tmp_path, **kwargs)
+                elif engine == "faster-whisper":
+                    kwargs = {
+                        "language": language or None,
+                        "initial_prompt": initial_prompt or None,
+                    }
+                    segments_iter, info = model.transcribe(tmp_path, **kwargs)
+                    segments_list = []
+                    for seg in segments_iter:
+                        segments_list.append(
+                            {
+                                "start": float(seg.start),
+                                "end": float(seg.end),
+                                "text": seg.text,
+                            }
+                        )
+                    result = {"text": " ".join(s["text"].strip() for s in segments_list).strip(), "segments": segments_list}
+                else:
+                    kwargs = {
+                        "batch_size": batch_size,
+                        "language": language,
+                    }
+                    if initial_prompt:
+                        try:
+                            import inspect
+
+                            sig = inspect.signature(model.transcribe)
+                            if "initial_prompt" in sig.parameters:
+                                kwargs["initial_prompt"] = initial_prompt
+                            elif "prompt" in sig.parameters:
+                                kwargs["prompt"] = initial_prompt
+                        except Exception:
+                            pass
+                    result = model.transcribe(audio, **kwargs)
+                text = (result or {}).get("text", "") or ""
+                segments = (result or {}).get("segments", []) or []
+                if not text and segments:
+                    try:
+                        text = " ".join(seg.get("text", "").strip() for seg in segments).strip()
+                    except Exception:
+                        text = ""
+                if not text and language and engine != "faster-whisper":
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs.pop("language", None)
+                    try:
+                        if engine == "whisper":
+                            result = model.transcribe(tmp_path, **retry_kwargs)
+                        else:
+                            result = model.transcribe(audio, **retry_kwargs)
+                        text = (result or {}).get("text", "") or ""
+                        segments = (result or {}).get("segments", []) or []
+                        if not text and segments:
+                            text = " ".join(seg.get("text", "").strip() for seg in segments).strip()
+                    except Exception:
+                        pass
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                global last_transcribe_ms
+                last_transcribe_ms = elapsed_ms
+                print(
+                    f"[worker] transcribe done ms={elapsed_ms} segments={len(segments)} text_len={len(text)}",
+                    flush=True,
+                )
+                self._json_response(200, {"text": text, "segments": segments, "segments_len": len(segments)})
+            except Exception as exc:
+                global last_error
+                last_error = f"transcribe failed: {exc}"
+                print(f"[worker] transcribe error: {exc}", flush=True)
+                self._json_response(500, {"error": f"transcribe failed: {exc}"})
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+
+    server = HTTPServer((args.host, args.port), WhisperXHandler)
+    print(f"[worker] listening on {args.host}:{args.port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

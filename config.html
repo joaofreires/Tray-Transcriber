@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tray Transcriber Settings</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        margin: 0;
+        padding: 16px;
+        background: #f6f7fb;
+        color: #111;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 12px 0;
+      }
+      .section {
+        background: #fff;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 12px;
+        border: 1px solid #e6e8ef;
+      }
+      .dict-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .dict-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .dict-remove {
+        border: 1px solid #e0e3eb;
+        background: #fff;
+        color: #b42318;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .dict-add {
+        border: 1px dashed #0b5cff;
+        background: #eef4ff;
+        color: #0b5cff;
+        padding: 6px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        margin-top: 6px;
+        align-self: flex-start;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin: 8px 0 12px 0;
+        flex-wrap: wrap;
+      }
+      .tab-btn {
+        padding: 6px 10px;
+        border: 1px solid #d2d6e0;
+        background: #fff;
+        color: #333;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .tab-btn.active {
+        border-color: #0b5cff;
+        color: #0b5cff;
+        font-weight: 600;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+      label {
+        font-size: 12px;
+        color: #444;
+        display: block;
+        margin-bottom: 4px;
+      }
+      input, select, textarea {
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid #d2d6e0;
+        border-radius: 6px;
+        font-size: 13px;
+        background: #fff;
+        box-sizing: border-box;
+      }
+      textarea {
+        min-height: 60px;
+        resize: vertical;
+      }
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      button {
+        padding: 8px 12px;
+        border: 1px solid #0b5cff;
+        background: #0b5cff;
+        color: #fff;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.secondary {
+        background: #fff;
+        color: #0b5cff;
+      }
+      .hint {
+        font-size: 11px;
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Tray Transcriber Settings</h1>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="general">General</button>
+      <button class="tab-btn" data-tab="model">Model</button>
+      <button class="tab-btn" data-tab="dictionary">Dictionary</button>
+      <button class="tab-btn" data-tab="prompt">Prompt</button>
+      <button class="tab-btn" data-tab="worker">Worker</button>
+      <button class="tab-btn" data-tab="advanced">Advanced</button>
+    </div>
+
+    <div class="section tab-panel" data-panel="general">
+      <div class="row">
+        <div>
+          <label for="hotkey">Hotkey</label>
+          <input id="hotkey" type="text" />
+          <div class="hint">Example: CommandOrControl+Shift+Space</div>
+        </div>
+        <div>
+          <label for="pressToTalk">Press-to-talk</label>
+          <select id="pressToTalk">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="holdToTalk">Hold-to-talk</label>
+          <select id="holdToTalk">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+        <div>
+          <label for="pasteMode">Paste Mode</label>
+          <select id="pasteMode">
+            <option value="clipboard">Clipboard only</option>
+            <option value="paste">Auto-paste</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="section tab-panel" data-panel="model" hidden>
+      <div class="row">
+        <div>
+          <label for="asrEngine">ASR Engine</label>
+          <select id="asrEngine">
+            <option value="whisperx">whisperx</option>
+            <option value="whisper">whisper (OpenAI)</option>
+            <option value="faster-whisper">faster-whisper</option>
+          </select>
+        </div>
+        <div>
+          <label for="model">Model</label>
+          <select id="model">
+            <option value="tiny">tiny</option>
+            <option value="base">base</option>
+            <option value="small">small</option>
+            <option value="medium">medium</option>
+            <option value="large">large</option>
+          </select>
+        </div>
+        <div>
+          <label for="language">Language</label>
+          <input id="language" type="text" placeholder="en (leave blank for auto)" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="device">Device</label>
+          <select id="device">
+            <option value="default">default</option>
+            <option value="cpu">cpu</option>
+            <option value="gpu">gpu</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="computeType">Compute Type</label>
+          <select id="computeType">
+            <option value="int8">int8</option>
+            <option value="int8_float16">int8_float16</option>
+            <option value="int16">int16</option>
+            <option value="float32">float32</option>
+          </select>
+        </div>
+        <div>
+          <label for="batchSize">Batch Size</label>
+          <input id="batchSize" type="number" min="1" max="32" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="noAlign">Skip Alignment</label>
+          <select id="noAlign">
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="section tab-panel" data-panel="dictionary" hidden>
+      <div class="row">
+        <div>
+          <label>Dictionary Entries</label>
+          <div class="dict-list" id="dictionaryList"></div>
+          <button class="dict-add" id="dictionaryAddBtn" type="button">+ Add word</button>
+          <div class="hint">Add words you want the model to recognize or bias toward.</div>
+        </div>
+        <div>
+          <label for="includeDictionaryInPrompt">Include in Prompt</label>
+          <select id="includeDictionaryInPrompt">
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+          <label for="includeDictionaryDescriptions">Include Descriptions</label>
+          <select id="includeDictionaryDescriptions">
+            <option value="false">No</option>
+            <option value="true">Yes</option>
+          </select>
+          <div class="hint">Descriptions should be short (3–8 words).</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section tab-panel" data-panel="prompt" hidden>
+      <div class="row">
+        <div>
+          <label for="prompt">Custom Prompt</label>
+          <textarea id="prompt" placeholder="Optional prompt to steer transcription..."></textarea>
+        </div>
+        <div>
+          <label for="promptMode">Prompt Mode</label>
+          <select id="promptMode">
+            <option value="append">Append dictionary</option>
+            <option value="prepend">Prepend dictionary</option>
+          </select>
+          <div class="hint">If dictionary is enabled, it will be appended/prepended to the prompt.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section tab-panel" data-panel="worker" hidden>
+      <div class="row">
+        <div>
+          <label for="useWorker">Use Worker</label>
+          <select id="useWorker">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+        <div>
+          <label for="workerWarmup">Worker Warmup</label>
+          <select id="workerWarmup">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="workerHost">Worker Host</label>
+          <input id="workerHost" type="text" />
+        </div>
+        <div>
+          <label for="workerPort">Worker Port</label>
+          <input id="workerPort" type="number" min="1" max="65535" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="workerRequestTimeoutMs">Worker Timeout (ms)</label>
+          <input id="workerRequestTimeoutMs" type="number" min="1000" step="1000" />
+        </div>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="section tab-panel" data-panel="advanced" hidden>
+      <div class="row">
+        <div>
+          <label for="disableCuda">Disable CUDA</label>
+          <select id="disableCuda">
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div>
+          <label for="forceNoWeightsOnlyLoad">Torch load workaround</label>
+          <select id="forceNoWeightsOnlyLoad">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="minRecordingBytes">Min Recording Bytes</label>
+          <input id="minRecordingBytes" type="number" min="0" />
+        </div>
+        <div>
+          <label for="workerStatusPollMs">Worker Status Poll (ms)</label>
+          <input id="workerStatusPollMs" type="number" min="0" step="1000" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="holdStopOnModifierRelease">Stop on Modifier Release</label>
+          <select id="holdStopOnModifierRelease">
+            <option value="false">No</option>
+            <option value="true">Yes</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="saveBtn">Save</button>
+      <button id="closeBtn" class="secondary">Close</button>
+    </div>
+
+    <script src="config.js"></script>
+  </body>
+</html>

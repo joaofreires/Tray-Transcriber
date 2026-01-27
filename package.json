@@ -1,0 +1,17 @@
+{
+  "name": "tray-transcriber",
+  "version": "0.1.0",
+  "description": "System tray whisperx transcriber",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node scripts/start.js"
+  },
+  "dependencies": {
+    "electron": "^29.4.0"
+  },
+  "optionalDependencies": {
+    "robotjs": "^0.6.0",
+    "uiohook-napi": "^1.4.4"
+  }
+}
