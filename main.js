@@ -26,10 +26,137 @@ let workerReady = false;
 let workerWarmupKey = null;
 let transcribeQueue = [];
 let transcribeRunning = false;
+let logger = null;
+let consolePatched = false;
+
+function resolveBundledPath(relPath) {
+  const candidates = [];
+  if (app && app.isPackaged) {
+    candidates.push(path.join(process.resourcesPath, relPath));
+    candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', relPath));
+  }
+  candidates.push(path.join(__dirname, relPath));
+  candidates.push(path.join(__dirname, 'bundle', relPath));
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolvePythonCommand() {
+  if (config && config.pythonPath) {
+    const custom = config.pythonPath.trim();
+    if (custom) return custom;
+  }
+  const pyPath = resolveBundledPath(path.join('python', 'bin', 'python'));
+  if (pyPath) {
+    try {
+      const stat = fs.statSync(pyPath);
+      if (stat.isFile()) return pyPath;
+    } catch (_) {}
+  }
+  return config.whisperxCommand || 'python';
+}
+
+function resolveFfmpegDir() {
+  const ffmpegPath = resolveBundledPath(path.join('ffmpeg', 'ffmpeg'));
+  if (!ffmpegPath) return null;
+  return path.dirname(ffmpegPath);
+}
+
+function resolveWorkerScriptPath() {
+  const bundled = resolveBundledPath(path.join('worker', 'worker.py'));
+  if (bundled) return bundled;
+  const unpacked = resolveBundledPath(path.join('python', 'worker.py'));
+  if (unpacked) return unpacked;
+  const dev = path.join(__dirname, 'python', 'worker.py');
+  if (fs.existsSync(dev)) return dev;
+  return null;
+}
+
+function buildWorkerEnv() {
+  const env = { ...process.env };
+  const ffmpegDir = resolveFfmpegDir();
+  if (ffmpegDir) {
+    env.PATH = `${ffmpegDir}${path.delimiter}${env.PATH || ''}`;
+  }
+  if ((config.disableCuda && config.device !== 'gpu') || config.device === 'cpu') {
+    env.CUDA_VISIBLE_DEVICES = '';
+    env.NVIDIA_VISIBLE_DEVICES = 'none';
+  }
+  if (config.forceNoWeightsOnlyLoad) {
+    env.TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = '1';
+  }
+  if (logger && logger.filePath) {
+    env.TRANSCRIBER_LOG_PATH = logger.filePath;
+  }
+  if (logger && logger.levelName) {
+    env.TRANSCRIBER_LOG_LEVEL = logger.levelName;
+  }
+  return env;
+}
+
+function createLogger() {
+  const levels = { silent: 0, error: 1, info: 2, debug: 3 };
+  const configured = (config && config.logLevel) || 'auto';
+  const levelName = configured === 'auto'
+    ? (app && app.isPackaged ? 'error' : 'debug')
+    : configured;
+  const level = levels[levelName] ?? levels.error;
+  const logDir = path.join(app.getPath('userData'), 'logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  const filePath = path.join(logDir, 'app.log');
+
+  const writeLine = (msg) => {
+    try {
+      fs.appendFileSync(filePath, msg + '\n');
+    } catch (_) {}
+  };
+
+  const format = (lvl, args) => {
+    const line = `[${new Date().toISOString()}] [${lvl}] ${args.join(' ')}`;
+    return line;
+  };
+
+  return {
+    levelName,
+    filePath,
+    error: (...args) => {
+      if (level >= levels.error) {
+        const line = format('ERROR', args);
+        writeLine(line);
+        if (!app.isPackaged) process.stderr.write(line + '\n');
+      }
+    },
+    info: (...args) => {
+      if (level >= levels.info) {
+        const line = format('INFO', args);
+        writeLine(line);
+        if (!app.isPackaged) process.stdout.write(line + '\n');
+      }
+    },
+    debug: (...args) => {
+      if (level >= levels.debug) {
+        const line = format('DEBUG', args);
+        writeLine(line);
+        if (!app.isPackaged) process.stdout.write(line + '\n');
+      }
+    }
+  };
+}
+
+function installConsoleLogger() {
+  if (consolePatched || !logger) return;
+  consolePatched = true;
+  console.log = (...args) => logger.info(...args);
+  console.warn = (...args) => logger.error(...args);
+  console.error = (...args) => logger.error(...args);
+  logger.debug('[log] console patched', { file: logger.filePath, level: logger.levelName });
+}
 
 const defaultConfig = {
   hotkey: 'CommandOrControl+Shift+Space',
-  holdToTalk: false,
+  holdToTalk: true,
   holdHotkey: null,
   preferKeyHook: true,
   pressToTalk: true,
@@ -38,9 +165,12 @@ const defaultConfig = {
   dictionary: ["OpenAI", "WhisperX"],
   includeDictionaryInPrompt: true,
   includeDictionaryDescriptions: false,
+  dictionaryCorrections: [],
   prompt: '',
   promptMode: 'append',
-  asrEngine: 'whisperx',
+  logLevel: 'auto',
+  pythonPath: '',
+  asrEngine: 'faster-whisper',
   device: 'default',
   language: 'en',
   model: 'small',
@@ -189,7 +319,7 @@ function registerHotkey() {
     toggleRecording();
   });
   if (!ok) {
-    console.error('Failed to register hotkey:', config.hotkey);
+    logger?.error('Failed to register hotkey:', config.hotkey);
   }
 }
 
@@ -630,15 +760,8 @@ async function runWhisperX(audioPath) {
   }
 
   await new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    if ((config.disableCuda && config.device !== 'gpu') || config.device === 'cpu') {
-      env.CUDA_VISIBLE_DEVICES = '';
-      env.NVIDIA_VISIBLE_DEVICES = 'none';
-    }
-    if (config.forceNoWeightsOnlyLoad) {
-      env.TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = '1';
-    }
-    const proc = spawn(config.whisperxCommand, args, { stdio: 'inherit', env });
+    const env = buildWorkerEnv();
+    const proc = spawn(resolvePythonCommand(), args, { stdio: 'inherit', env });
     proc.on('error', reject);
     proc.on('close', (code) => {
       if (code === 0) resolve();
@@ -655,23 +778,27 @@ async function runWhisperX(audioPath) {
 
 function startWorker() {
   if (workerProc) return;
-  const scriptPath = path.join(__dirname, 'python', 'worker.py');
-  const env = { ...process.env };
-  if (config.disableCuda) {
-    env.CUDA_VISIBLE_DEVICES = '';
-    env.NVIDIA_VISIBLE_DEVICES = 'none';
+  const scriptPath = resolveWorkerScriptPath();
+  if (!scriptPath) {
+    console.error('[worker] worker.py not found');
+    return;
   }
-  if (config.forceNoWeightsOnlyLoad) {
-    env.TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = '1';
+  const env = buildWorkerEnv();
+  const pythonCmd = resolvePythonCommand();
+  try {
+    workerProc = spawn(
+      pythonCmd,
+      ['-u', scriptPath, '--host', config.workerHost, '--port', String(config.workerPort)],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env
+      }
+    );
+  } catch (err) {
+    console.error('[worker] spawn failed', err, { pythonCmd, scriptPath });
+    workerProc = null;
+    return;
   }
-  workerProc = spawn(
-    config.whisperxCommand,
-    ['-u', scriptPath, '--host', config.workerHost, '--port', String(config.workerPort)],
-    {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env
-    }
-  );
   workerProc.stdout.on('data', (chunk) => {
     process.stdout.write(`[worker] ${chunk}`);
   });
@@ -933,7 +1060,8 @@ ipcMain.on('debug-log', (_event, payload) => {
 
 function normalizeTranscript(text) {
   if (!text) return '';
-  return String(text).replace(/\s+/g, ' ').trim();
+  const normalized = String(text).replace(/\s+/g, ' ').trim();
+  return applyDictionaryCorrections(normalized);
 }
 
 function buildInitialPrompt() {
@@ -979,8 +1107,36 @@ function getDictionaryItems() {
   return items;
 }
 
+function getDictionaryCorrections() {
+  const raw = Array.isArray(config.dictionaryCorrections) ? config.dictionaryCorrections : [];
+  const items = [];
+  for (const entry of raw) {
+    if (!entry) continue;
+    if (typeof entry === 'object') {
+      const from = String(entry.from || entry.source || '').trim();
+      const to = String(entry.to || entry.target || '').trim();
+      if (from && to) items.push({ from, to });
+    }
+  }
+  return items;
+}
+
+function applyDictionaryCorrections(text) {
+  const rules = getDictionaryCorrections();
+  if (!rules.length) return text;
+  let result = text;
+  for (const rule of rules) {
+    const escaped = rule.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+    result = result.replace(regex, rule.to);
+  }
+  return result;
+}
+
 app.whenReady().then(() => {
   config = loadConfig();
+  logger = createLogger();
+  installConsoleLogger();
   createWindow();
 
   if (process.platform === 'darwin') {
@@ -1020,6 +1176,8 @@ app.on('activate', () => {
 ipcMain.on('config-updated', (_event, newConfig) => {
   config = { ...config, ...newConfig };
   saveConfig(config);
+  logger = createLogger();
+  installConsoleLogger();
   registerHotkey();
   updateTrayMenu();
   restartWorker();

@@ -97,6 +97,61 @@ function getDictionaryList() {
   return items;
 }
 
+function setCorrectionsList(items) {
+  const list = $('correctionsList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!Array.isArray(items) || !items.length) {
+    addCorrectionRow({ from: '', to: '' });
+    return;
+  }
+  items.forEach(addCorrectionRow);
+}
+
+function addCorrectionRow(item) {
+  const list = $('correctionsList');
+  if (!list) return;
+  const row = document.createElement('div');
+  row.className = 'dict-row';
+
+  const fromInput = document.createElement('input');
+  fromInput.type = 'text';
+  fromInput.placeholder = 'Seen as';
+  fromInput.value = item.from || '';
+
+  const toInput = document.createElement('input');
+  toInput.type = 'text';
+  toInput.placeholder = 'Prefer';
+  toInput.value = item.to || '';
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'dict-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+  });
+
+  row.appendChild(fromInput);
+  row.appendChild(toInput);
+  row.appendChild(removeBtn);
+  list.appendChild(row);
+}
+
+function getCorrectionsList() {
+  const list = $('correctionsList');
+  if (!list) return [];
+  const rows = list.querySelectorAll('.dict-row');
+  const items = [];
+  rows.forEach((row) => {
+    const inputs = row.querySelectorAll('input');
+    const from = inputs[0]?.value.trim() || '';
+    const to = inputs[1]?.value.trim() || '';
+    if (from && to) items.push({ from, to });
+  });
+  return items;
+}
+
 async function loadConfig() {
   const config = await window.trayTranscriber.getConfig();
   setValue('hotkey', config.hotkey || '');
@@ -111,6 +166,7 @@ async function loadConfig() {
   setValue('batchSize', config.batchSize || 4);
   setValue('noAlign', String(!!config.noAlign));
   setDictionaryList(config.dictionary);
+  setCorrectionsList(config.dictionaryCorrections);
   setValue('includeDictionaryInPrompt', String(config.includeDictionaryInPrompt !== false));
   setValue('includeDictionaryDescriptions', String(!!config.includeDictionaryDescriptions));
   setValue('prompt', config.prompt || '');
@@ -123,12 +179,15 @@ async function loadConfig() {
   setValue('minRecordingBytes', config.minRecordingBytes || 200);
   setValue('workerStatusPollMs', config.workerStatusPollMs || 30000);
   setValue('holdStopOnModifierRelease', String(!!config.holdStopOnModifierRelease));
+  setValue('logLevel', config.logLevel || 'auto');
+  setValue('pythonPath', config.pythonPath || '');
   setValue('disableCuda', String(!!config.disableCuda));
   setValue('forceNoWeightsOnlyLoad', String(!!config.forceNoWeightsOnlyLoad));
 }
 
 function gatherConfig() {
   const dictionary = getDictionaryList();
+  const dictionaryCorrections = getCorrectionsList();
 
   return {
     hotkey: $('hotkey').value.trim(),
@@ -143,6 +202,7 @@ function gatherConfig() {
     batchSize: getNumber('batchSize') || 4,
     noAlign: getBool('noAlign'),
     dictionary,
+    dictionaryCorrections,
     includeDictionaryInPrompt: getBool('includeDictionaryInPrompt'),
     includeDictionaryDescriptions: getBool('includeDictionaryDescriptions'),
     prompt: $('prompt').value,
@@ -155,6 +215,8 @@ function gatherConfig() {
     minRecordingBytes: getNumber('minRecordingBytes') || 200,
     workerStatusPollMs: getNumber('workerStatusPollMs') || 30000,
     holdStopOnModifierRelease: getBool('holdStopOnModifierRelease'),
+    logLevel: $('logLevel').value,
+    pythonPath: $('pythonPath').value.trim(),
     disableCuda: getBool('disableCuda'),
     forceNoWeightsOnlyLoad: getBool('forceNoWeightsOnlyLoad')
   };
@@ -188,5 +250,12 @@ const addBtn = $('dictionaryAddBtn');
 if (addBtn) {
   addBtn.addEventListener('click', () => {
     addDictionaryRow({ term: '', description: '' });
+  });
+}
+
+const correctionsAddBtn = $('correctionsAddBtn');
+if (correctionsAddBtn) {
+  correctionsAddBtn.addEventListener('click', () => {
+    addCorrectionRow({ from: '', to: '' });
   });
 }

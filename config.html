@@ -255,6 +255,15 @@
           <div class="hint">Descriptions should be short (3–8 words).</div>
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>Preferred Spellings (replace on output)</label>
+          <div class="dict-list" id="correctionsList"></div>
+          <button class="dict-add" id="correctionsAddBtn" type="button">+ Add correction</button>
+          <div class="hint">These do not go into the prompt; they replace output text.</div>
+        </div>
+        <div></div>
+      </div>
     </div>
 
     <div class="section tab-panel" data-panel="prompt" hidden>
@@ -344,6 +353,22 @@
             <option value="false">No</option>
             <option value="true">Yes</option>
           </select>
+        </div>
+        <div>
+          <label for="logLevel">Log Level</label>
+          <select id="logLevel">
+            <option value="auto">auto</option>
+            <option value="error">error</option>
+            <option value="info">info</option>
+            <option value="debug">debug</option>
+            <option value="silent">silent</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="pythonPath">Python Path (dev)</label>
+          <input id="pythonPath" type="text" placeholder="Leave blank to use bundled/system python" />
         </div>
         <div></div>
       </div>

@@ -2,16 +2,53 @@
   "name": "tray-transcriber",
   "version": "0.1.0",
   "description": "System tray whisperx transcriber",
+  "author": "Joao",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node scripts/start.js"
+    "start": "node scripts/start.js",
+    "bundle:prep": "node scripts/bundle_prepare.js",
+    "dist:linux": "npm run bundle:prep && electron-builder --linux AppImage",
+    "dist:mac": "npm run bundle:prep && electron-builder --mac"
   },
-  "dependencies": {
-    "electron": "^29.4.0"
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^29.4.0",
+    "electron-builder": "^24.13.3"
   },
   "optionalDependencies": {
     "robotjs": "^0.6.0",
     "uiohook-napi": "^1.4.4"
+  },
+  "build": {
+    "appId": "com.tray.transcriber",
+    "productName": "TrayTranscriber",
+    "files": [
+      "**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "bundle/python",
+        "to": "python"
+      },
+      {
+        "from": "bundle/ffmpeg",
+        "to": "ffmpeg"
+      },
+      {
+        "from": "python",
+        "to": "worker"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    }
   }
 }
