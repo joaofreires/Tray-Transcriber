@@ -928,6 +928,11 @@ function tryPaste(text) {
   const systemResult = tryPasteViaSystem();
   if (systemResult) return true;
 
+  // Avoid robotjs on macOS when accessibility is disabled (can abort the process).
+  if (process.platform === 'darwin') {
+    return false;
+  }
+
   try {
     console.log('[paste] trying robotjs');
     const robot = require('robotjs');
@@ -956,7 +961,11 @@ function tryPasteViaSystem() {
       'tell application "System Events" to keystroke "v" using command down'
     ]);
     if (result.status !== 0) {
-      console.warn('[paste] osascript failed:', result.stderr ? result.stderr.toString() : result.status);
+      const stderr = result.stderr ? result.stderr.toString() : '';
+      console.warn('[paste] osascript failed:', stderr || result.status);
+      if (stderr.includes('Not authorized') || stderr.includes('System Events') || stderr.includes('not authorized')) {
+        console.warn('[paste] accessibility not granted; paste disabled on macOS');
+      }
     } else {
       console.log('[paste] osascript succeeded');
     }
