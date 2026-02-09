@@ -11,7 +11,9 @@
     "dist:linux": "npm run bundle:prep && electron-builder --linux AppImage",
     "dist:mac": "npm run bundle:prep && electron-builder --mac"
   },
-  "dependencies": {},
+  "dependencies": {
+    "node-abi": "^4.26.0"
+  },
   "devDependencies": {
     "electron": "^29.4.0",
     "electron-builder": "^24.13.3"
