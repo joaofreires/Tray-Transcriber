@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const http = require('http');
+const util = require('util');
 
 let tray = null;
 let win = null;
@@ -28,6 +29,11 @@ let transcribeQueue = [];
 let transcribeRunning = false;
 let logger = null;
 let consolePatched = false;
+let workerReadyResolve = null;
+let workerPending = new Map();
+let workerBuffer = '';
+let workerMsgId = 0;
+let workerStdioReadyPromise = null;
 
 function resolveBundledPath(relPath) {
   const candidates = [];
@@ -74,6 +80,11 @@ function resolveWorkerScriptPath() {
   return null;
 }
 
+function getWorkerTransport() {
+  const value = config && config.workerTransport ? String(config.workerTransport).toLowerCase() : 'http';
+  return value === 'stdio' ? 'stdio' : 'http';
+}
+
 function buildWorkerEnv() {
   const env = { ...process.env };
   const ffmpegDir = resolveFfmpegDir();
@@ -113,8 +124,20 @@ function createLogger() {
     } catch (_) {}
   };
 
+  const formatArg = (arg) => {
+    if (typeof arg === 'string') return arg;
+    if (arg instanceof Error) {
+      return arg.stack || arg.message || String(arg);
+    }
+    try {
+      return util.inspect(arg, { depth: 4, breakLength: 120, compact: true });
+    } catch (_) {
+      return String(arg);
+    }
+  };
+
   const format = (lvl, args) => {
-    const line = `[${new Date().toISOString()}] [${lvl}] ${args.join(' ')}`;
+    const line = `[${new Date().toISOString()}] [${lvl}] ${args.map(formatArg).join(' ')}`;
     return line;
   };
 
@@ -183,6 +206,7 @@ const defaultConfig = {
   useWorker: true,
   workerHost: '127.0.0.1',
   workerPort: 8765,
+  workerTransport: 'http',
   workerStartupTimeoutMs: 15000,
   workerWarmup: true,
   workerRequestTimeoutMs: 600000,
@@ -776,6 +800,79 @@ async function runWhisperX(audioPath) {
   return text;
 }
 
+function resetWorkerStdioState() {
+  workerPending = new Map();
+  workerBuffer = '';
+  workerReadyResolve = null;
+}
+
+function setupWorkerStdio(proc) {
+  resetWorkerStdioState();
+  workerReady = false;
+  workerPromise = null;
+  const readyPromise = new Promise((resolve) => {
+    workerReadyResolve = resolve;
+  });
+  proc.stdout.on('data', (chunk) => {
+    workerBuffer += chunk.toString('utf8');
+    let idx;
+    while ((idx = workerBuffer.indexOf('\n')) >= 0) {
+      const line = workerBuffer.slice(0, idx).trim();
+      workerBuffer = workerBuffer.slice(idx + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (err) {
+        logger?.error('[worker] invalid json from stdio', line);
+        continue;
+      }
+      handleWorkerMessage(msg);
+    }
+  });
+  return readyPromise;
+}
+
+function handleWorkerMessage(msg) {
+  if (!msg) return;
+  if (msg.type === 'ready') {
+    workerReady = true;
+    if (workerReadyResolve) workerReadyResolve(true);
+    return;
+  }
+  if (typeof msg.id !== 'undefined') {
+    const pending = workerPending.get(msg.id);
+    if (!pending) return;
+    workerPending.delete(msg.id);
+    if (msg.ok) {
+      pending.resolve(msg.result || {});
+    } else {
+      pending.reject(new Error(msg.error || 'worker error'));
+    }
+  }
+}
+
+function sendWorkerMessage(type, payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!workerProc || !workerProc.stdin || !workerProc.stdin.writable) {
+      reject(new Error('worker stdin not writable'));
+      return;
+    }
+    const id = ++workerMsgId;
+    workerPending.set(id, { resolve, reject });
+    const message = JSON.stringify({ id, type, payload });
+    workerProc.stdin.write(message + '\n');
+    if (timeoutMs) {
+      setTimeout(() => {
+        if (workerPending.has(id)) {
+          workerPending.delete(id);
+          reject(new Error(`worker request timeout after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+    }
+  });
+}
+
 function startWorker() {
   if (workerProc) return;
   const scriptPath = resolveWorkerScriptPath();
@@ -785,12 +882,13 @@ function startWorker() {
   }
   const env = buildWorkerEnv();
   const pythonCmd = resolvePythonCommand();
+  const transport = getWorkerTransport();
   try {
     workerProc = spawn(
       pythonCmd,
-      ['-u', scriptPath, '--host', config.workerHost, '--port', String(config.workerPort)],
+      ['-u', scriptPath, '--host', config.workerHost, '--port', String(config.workerPort), '--mode', transport],
       {
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         env
       }
     );
@@ -799,16 +897,21 @@ function startWorker() {
     workerProc = null;
     return;
   }
-  workerProc.stdout.on('data', (chunk) => {
-    process.stdout.write(`[worker] ${chunk}`);
-  });
+  if (transport === 'stdio') {
+    workerStdioReadyPromise = setupWorkerStdio(workerProc);
+  } else {
+    workerProc.stdout.on('data', (chunk) => {
+      logger?.info(`[worker] ${chunk.toString().trimEnd()}`);
+    });
+  }
   workerProc.stderr.on('data', (chunk) => {
-    process.stderr.write(`[worker] ${chunk}`);
+    logger?.error(`[worker] ${chunk.toString().trimEnd()}`);
   });
   workerProc.on('exit', () => {
     workerProc = null;
     workerReady = false;
     workerPromise = null;
+    workerStdioReadyPromise = null;
   });
 }
 
@@ -816,8 +919,27 @@ function ensureWorker() {
   if (!config.useWorker) return Promise.resolve(false);
   if (workerReady) return Promise.resolve(true);
   if (workerPromise) return workerPromise;
+  const transport = getWorkerTransport();
   workerPromise = new Promise((resolve) => {
     startWorker();
+    if (!workerProc) {
+      resolve(false);
+      return;
+    }
+    if (transport === 'stdio') {
+      const timeoutMs = config.workerStartupTimeoutMs || 15000;
+      const timeout = setTimeout(() => {
+        workerReady = false;
+        resolve(false);
+      }, timeoutMs);
+      if (workerStdioReadyPromise) {
+        workerStdioReadyPromise.then(() => {
+          clearTimeout(timeout);
+          resolve(true);
+        });
+      }
+      return;
+    }
     const start = Date.now();
     const timer = setInterval(() => {
       const elapsed = Date.now() - start;
@@ -861,6 +983,15 @@ async function transcribeViaWorker(audioPath) {
     initial_prompt: prompt || undefined,
     device: config.device || 'default'
   };
+  const transport = getWorkerTransport();
+  if (transport === 'stdio') {
+    const timeoutMs = config.workerRequestTimeoutMs || 30000;
+    const result = await sendWorkerMessage('transcribe', payload, timeoutMs);
+    if (result && typeof result.segments_len === 'number') {
+      logger?.debug('[worker] segments_len=', String(result.segments_len));
+    }
+    return result && result.text ? result.text : '';
+  }
   const body = JSON.stringify(payload);
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -1234,6 +1365,16 @@ async function warmupWorker() {
     compute_type: config.computeType,
     device: config.device || 'default'
   };
+  const transport = getWorkerTransport();
+  if (transport === 'stdio') {
+    try {
+      await sendWorkerMessage('warmup', payload, config.workerStartupTimeoutMs || 15000);
+      workerWarmupKey = key;
+    } catch (err) {
+      logger?.error('[worker] warmup failed', err && err.message ? err.message : String(err));
+    }
+    return;
+  }
   await new Promise((resolve) => {
     const body = JSON.stringify(payload);
     const req = http.request(
@@ -1263,7 +1404,18 @@ async function warmupWorker() {
 
 function fetchWorkerStatus(context) {
   if (!config.useWorker) {
-    console.log('[worker] status: disabled');
+    logger?.info('[worker] status: disabled');
+    return;
+  }
+  const transport = getWorkerTransport();
+  if (transport === 'stdio') {
+    sendWorkerMessage('status', {}, 2000)
+      .then((result) => {
+        logger?.info('[worker] status', context || '', JSON.stringify(result));
+      })
+      .catch((err) => {
+        logger?.error('[worker] status request failed', context || '', err && err.message ? err.message : String(err));
+      });
     return;
   }
   const req = http.get(
@@ -1280,15 +1432,15 @@ function fetchWorkerStatus(context) {
         }
         try {
           const parsed = JSON.parse(data);
-          console.log('[worker] status', context || '', parsed);
+          logger?.info('[worker] status', context || '', JSON.stringify(parsed));
         } catch (err) {
-          console.log('[worker] status parse error', context || '', err);
+          logger?.error('[worker] status parse error', context || '', err && err.message ? err.message : String(err));
         }
       });
     }
   );
   req.on('error', (err) => {
-    console.log('[worker] status request failed', context || '', err.message);
+    logger?.error('[worker] status request failed', context || '', err.message);
   });
   req.on('timeout', () => {
     req.destroy(new Error('status timeout'));

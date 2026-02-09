@@ -312,6 +312,16 @@
       </div>
       <div class="row">
         <div>
+          <label for="workerTransport">Worker Transport</label>
+          <select id="workerTransport">
+            <option value="stdio">StdIO</option>
+            <option value="http">HTTP</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+      <div class="row">
+        <div>
           <label for="workerRequestTimeoutMs">Worker Timeout (ms)</label>
           <input id="workerRequestTimeoutMs" type="number" min="1000" step="1000" />
         </div>

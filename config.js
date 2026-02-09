@@ -175,6 +175,7 @@ async function loadConfig() {
   setValue('workerWarmup', String(!!config.workerWarmup));
   setValue('workerHost', config.workerHost || '127.0.0.1');
   setValue('workerPort', config.workerPort || 8765);
+  setValue('workerTransport', config.workerTransport || 'stdio');
   setValue('workerRequestTimeoutMs', config.workerRequestTimeoutMs || 600000);
   setValue('minRecordingBytes', config.minRecordingBytes || 200);
   setValue('workerStatusPollMs', config.workerStatusPollMs || 30000);
@@ -211,6 +212,7 @@ function gatherConfig() {
     workerWarmup: getBool('workerWarmup'),
     workerHost: $('workerHost').value.trim() || '127.0.0.1',
     workerPort: getNumber('workerPort') || 8765,
+    workerTransport: $('workerTransport').value,
     workerRequestTimeoutMs: getNumber('workerRequestTimeoutMs') || 600000,
     minRecordingBytes: getNumber('minRecordingBytes') || 200,
     workerStatusPollMs: getNumber('workerStatusPollMs') || 30000,

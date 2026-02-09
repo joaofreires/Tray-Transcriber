@@ -32,6 +32,7 @@ Key options (not exhaustive):
 - `dictionaryCorrections`: list of `{ from, to }` (output replacements)
 - `prompt`, `promptMode`, `includeDictionaryInPrompt`
 - `useWorker`: keep a background Python worker warm
+- `workerTransport`: `"http" | "stdio"` (default: `stdio`)
 - `pythonPath`: override Python path (dev)
 
 ### Dictionary vs Corrections
@@ -56,6 +57,10 @@ pip install -U faster-whisper
 
 ## Worker
 When `useWorker: true`, the app starts `python/worker.py` and keeps models loaded between requests.
+
+Transport options:
+- `http` (default): worker listens on `workerHost:workerPort`.
+- `stdio`: worker communicates over stdin/stdout (no HTTP server).
 
 ## Bundled Build (Linux/macOS)
 Bundle a minimal Python venv with **faster‑whisper** + ffmpeg.
