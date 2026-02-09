@@ -10,6 +10,7 @@ import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+base_whisper = None
 model_cache = {}
 model_lock = threading.Lock()
 last_error = None
@@ -43,6 +44,33 @@ def log(level, message):
         except Exception:
             pass
 
+
+def detect_whisper_module():
+    for name in ("whisperx", "whisper", "faster_whisper"):
+        try:
+            return importlib.import_module(name), name
+        except Exception:
+            continue
+    log("error", "no whisper module found. Install with: pip install -U openai-whisper whisperx faster-whisper")
+    return None, None
+
+
+def load_audio_with_fallback(path):
+    if base_whisper is not None and hasattr(base_whisper, "load_audio"):
+        return base_whisper.load_audio(path)
+    for name in ("whisperx", "whisper"):
+        try:
+            mod = importlib.import_module(name)
+        except Exception:
+            continue
+        if hasattr(mod, "load_audio"):
+            return mod.load_audio(path)
+    raise RuntimeError(
+        "no whisper module with load_audio found. Install with: pip install -U openai-whisper whisperx"
+    )
+
+
+base_whisper, _whisper_module_name = detect_whisper_module()
 
 def emit_stdout(payload):
     try:
@@ -103,6 +131,12 @@ def load_model_cached(model_name, device, compute_type, language, engine):
                 ) from exc
             model = faster_whisper.WhisperModel(model_name, device=resolved_device, compute_type=compute_type)
         else:
+            try:
+                whisperx = importlib.import_module("whisperx")
+            except Exception as exc:
+                raise RuntimeError(
+                    "whisperx not installed. Install with: pip install -U whisperx"
+                ) from exc
             model = whisperx.load_model(model_name, device=resolved_device, compute_type=compute_type, language=language)
     except Exception as exc:
         last_error = f"model load failed: {exc}"
@@ -178,7 +212,6 @@ def transcribe_payload(payload):
                 "info",
                 f"transcribe start engine={engine} model={model_name} device={device} lang={language} compute={compute_type} bytes={len(audio_bytes)}",
             )
-            audio = whisperx.load_audio(tmp_path)
             if engine == "whisper":
                 kwargs = {
                     "language": language,
@@ -207,6 +240,7 @@ def transcribe_payload(payload):
                     "segments": segments_list,
                 }
             else:
+                audio = load_audio_with_fallback(tmp_path)
                 kwargs = {
                     "batch_size": batch_size,
                     "language": language,
