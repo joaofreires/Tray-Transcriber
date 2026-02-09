@@ -10,9 +10,6 @@ import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import whisperx
-
-
 model_cache = {}
 model_lock = threading.Lock()
 last_error = None

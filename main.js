@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, clipboard, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, clipboard, shell, systemPreferences, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -34,6 +34,7 @@ let workerPending = new Map();
 let workerBuffer = '';
 let workerMsgId = 0;
 let workerStdioReadyPromise = null;
+let accessibilityWarningShown = false;
 
 function resolveBundledPath(relPath) {
   const candidates = [];
@@ -175,6 +176,40 @@ function installConsoleLogger() {
   console.warn = (...args) => logger.error(...args);
   console.error = (...args) => logger.error(...args);
   logger.debug('[log] console patched', { file: logger.filePath, level: logger.levelName });
+}
+
+function hasAccessibilityPermission() {
+  if (process.platform !== 'darwin') return true;
+  try {
+    // false = do not prompt automatically; we show our own message instead.
+    return systemPreferences.isTrustedAccessibilityClient(false);
+  } catch (err) {
+    console.warn('[perm] accessibility check failed:', err && err.message ? err.message : err);
+    return true;
+  }
+}
+
+function showAccessibilityWarning() {
+  if (accessibilityWarningShown || process.platform !== 'darwin') return;
+  accessibilityWarningShown = true;
+  const message = 'Accessibility permission is disabled. Global hotkeys and paste automation may not work.';
+  const detail = 'Enable TrayTranscriber (or Terminal/Electron during development) under System Settings → Privacy & Security → Accessibility. Without it, the app will fall back to limited hotkeys.';
+  dialog
+    .showMessageBox({
+      type: 'warning',
+      buttons: ['OK', 'Open Settings'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'TrayTranscriber Permission',
+      message,
+      detail
+    })
+    .then(({ response }) => {
+      if (response === 1) {
+        shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility');
+      }
+    })
+    .catch(() => {});
 }
 
 const defaultConfig = {
@@ -372,6 +407,11 @@ function toggleRecording() {
 
 function tryLoadHook() {
   if (hook) return hook;
+  if (!hasAccessibilityPermission()) {
+    console.warn('[hotkey] accessibility disabled; skipping uiohook');
+    showAccessibilityWarning();
+    return null;
+  }
   try {
     const mod = require('uiohook-napi');
     if (mod && mod.uIOhook && typeof mod.uIOhook.on === 'function') {
@@ -680,6 +720,11 @@ function clearHookListeners(h) {
 
 function safeStartHook(h) {
   try {
+    if (!hasAccessibilityPermission()) {
+      console.warn('[hotkey] not starting hook; accessibility disabled');
+      showAccessibilityWarning();
+      return;
+    }
     if (typeof h.start === 'function') {
       const result = h.start();
       if (result && typeof result.catch === 'function') {
