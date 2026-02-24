@@ -152,6 +152,61 @@ function getCorrectionsList() {
   return items;
 }
 
+function setShortcutsList(items) {
+  const list = $('shortcutsList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!Array.isArray(items) || !items.length) {
+    addShortcutRow({ shortcut: '', prompt: '' });
+    return;
+  }
+  items.forEach(addShortcutRow);
+}
+
+function addShortcutRow(item) {
+  const list = $('shortcutsList');
+  if (!list) return;
+  const row = document.createElement('div');
+  row.className = 'dict-row';
+
+  const shortcutInput = document.createElement('input');
+  shortcutInput.type = 'text';
+  shortcutInput.placeholder = 'Shortcut (e.g. CommandOrControl+Alt+P)';
+  shortcutInput.value = item.shortcut || '';
+
+  const promptInput = document.createElement('input');
+  promptInput.type = 'text';
+  promptInput.placeholder = 'Prompt (e.g. fix grammar)';
+  promptInput.value = item.prompt || '';
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'dict-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+  });
+
+  row.appendChild(shortcutInput);
+  row.appendChild(promptInput);
+  row.appendChild(removeBtn);
+  list.appendChild(row);
+}
+
+function getShortcutsList() {
+  const list = $('shortcutsList');
+  if (!list) return [];
+  const rows = list.querySelectorAll('.dict-row');
+  const items = [];
+  rows.forEach((row) => {
+    const inputs = row.querySelectorAll('input');
+    const shortcut = inputs[0]?.value.trim() || '';
+    const prompt = inputs[1]?.value.trim() || '';
+    if (shortcut && prompt) items.push({ shortcut, prompt });
+  });
+  return items;
+}
+
 async function loadConfig() {
   const config = await window.trayTranscriber.getConfig();
   setValue('hotkey', config.hotkey || '');
@@ -162,11 +217,17 @@ async function loadConfig() {
   setValue('model', config.model || 'small');
   setValue('language', config.language || '');
   setValue('device', config.device || 'default');
+  setValue('assistantName', config.assistantName || '');
+  setValue('llmEndpoint', config.llmEndpoint || '');
+  setValue('llmModel', config.llmModel || '');
+  setValue('llmApiKey', config.llmApiKey || '');
+  setValue('llmSystemPrompt', config.llmSystemPrompt || '');
   setValue('computeType', config.computeType || 'int8');
   setValue('batchSize', config.batchSize || 4);
   setValue('noAlign', String(!!config.noAlign));
   setDictionaryList(config.dictionary);
   setCorrectionsList(config.dictionaryCorrections);
+  setShortcutsList(config.assistantShortcuts);
   setValue('includeDictionaryInPrompt', String(config.includeDictionaryInPrompt !== false));
   setValue('includeDictionaryDescriptions', String(!!config.includeDictionaryDescriptions));
   setValue('prompt', config.prompt || '');
@@ -189,6 +250,7 @@ async function loadConfig() {
 function gatherConfig() {
   const dictionary = getDictionaryList();
   const dictionaryCorrections = getCorrectionsList();
+  const assistantShortcuts = getShortcutsList();
 
   return {
     hotkey: $('hotkey').value.trim(),
@@ -220,7 +282,13 @@ function gatherConfig() {
     logLevel: $('logLevel').value,
     pythonPath: $('pythonPath').value.trim(),
     disableCuda: getBool('disableCuda'),
-    forceNoWeightsOnlyLoad: getBool('forceNoWeightsOnlyLoad')
+    forceNoWeightsOnlyLoad: getBool('forceNoWeightsOnlyLoad'),
+    assistantName: $('assistantName').value.trim(),
+    llmEndpoint: $('llmEndpoint').value.trim(),
+    llmModel: $('llmModel').value.trim(),
+    llmApiKey: $('llmApiKey').value.trim(),
+    llmSystemPrompt: $('llmSystemPrompt').value.trim(),
+    assistantShortcuts
   };
 }
 
@@ -259,5 +327,12 @@ const correctionsAddBtn = $('correctionsAddBtn');
 if (correctionsAddBtn) {
   correctionsAddBtn.addEventListener('click', () => {
     addCorrectionRow({ from: '', to: '' });
+  });
+}
+
+const shortcutsAddBtn = $('shortcutsAddBtn');
+if (shortcutsAddBtn) {
+  shortcutsAddBtn.addEventListener('click', () => {
+    addShortcutRow({ shortcut: '', prompt: '' });
   });
 }

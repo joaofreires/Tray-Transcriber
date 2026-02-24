@@ -35,6 +35,22 @@ Key options (not exhaustive):
 - `workerTransport`: `"http" | "stdio"` (default: `stdio`)
 - `pythonPath`: override Python path (dev)
 
+### LLM Assistant
+- `assistantName`: spoken trigger words (e.g. "AI Assistant"). If the transcript begins with this name, the remainder is sent to the configured LLM instead of being pasted.
+- `llmEndpoint`: URL of an OpenAI-compatible chat completion endpoint (default OpenAI).
+- `llmModel`: model name to request (default `gpt-3.5-turbo`).
+- `llmApiKey`: optional API key; if empty the `OPENAI_API_KEY` environment variable is used.
+
+When the assistant is triggered and there is text selected in the target application, the selected text is appended to the prompt. The LLM response will replace the selection (or simply be pasted if nothing was selected).
+
+The tray icon will animate (spin) while the transcription or LLM request is processing.
+
+Example voice command:
+
+> "AI Assistant make this text a poem"
+
+
+
 ### Dictionary vs Corrections
 - **Dictionary** entries are added to the prompt to bias recognition.
 - **Preferred spellings** (corrections) are applied after transcription as replacements.
