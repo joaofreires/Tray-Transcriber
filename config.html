@@ -134,6 +134,7 @@
       <button class="tab-btn" data-tab="dictionary">Dictionary</button>
       <button class="tab-btn" data-tab="prompt">Prompt</button>
       <button class="tab-btn" data-tab="worker">Worker</button>
+      <button class="tab-btn" data-tab="shortcuts">Shortcuts</button>
       <button class="tab-btn" data-tab="advanced">Advanced</button>
     </div>
 
@@ -167,6 +168,14 @@
             <option value="paste">Auto-paste</option>
           </select>
         </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="assistantName">Assistant Name</label>
+          <input id="assistantName" type="text" placeholder="e.g. AI Assistant" />
+          <div class="hint">First words recognised trigger the LLM request.</div>
+        </div>
+        <div></div>
       </div>
     </div>
 
@@ -329,6 +338,17 @@
       </div>
     </div>
 
+    <div class="section tab-panel" data-panel="shortcuts" hidden>
+      <div class="row">
+        <div style="grid-column: 1 / -1;">
+          <label>Assistant Shortcuts</label>
+          <div class="dict-list" id="shortcutsList"></div>
+          <button class="dict-add" id="shortcutsAddBtn" type="button">+ Add shortcut</button>
+          <div class="hint">Bind a global hotkey to a specific LLM prompt (e.g. "CommandOrControl+Shift+P" -> "Fix grammar").</div>
+        </div>
+      </div>
+    </div>
+
     <div class="section tab-panel" data-panel="advanced" hidden>
       <div class="row">
         <div>
@@ -381,6 +401,30 @@
           <input id="pythonPath" type="text" placeholder="Leave blank to use bundled/system python" />
         </div>
         <div></div>
+      </div>
+      <hr />
+      <div class="row">
+        <div>
+          <label for="llmEndpoint">LLM Endpoint</label>
+          <input id="llmEndpoint" type="text" placeholder="https://api.openai.com/v1/chat/completions" />
+        </div>
+        <div>
+          <label for="llmModel">LLM Model</label>
+          <input id="llmModel" type="text" placeholder="gpt-3.5-turbo" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="llmApiKey">LLM API Key</label>
+          <input id="llmApiKey" type="password" placeholder="optional (env overrides)" />
+        </div>
+        <div></div>
+      </div>
+      <div class="row">
+        <div style="grid-column: 1 / -1;">
+          <label for="llmSystemPrompt">LLM System Prompt</label>
+          <textarea id="llmSystemPrompt" placeholder="e.g. You are a helpful assistant that writes concise, professional emails."></textarea>
+        </div>
       </div>
     </div>
 

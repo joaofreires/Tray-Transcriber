@@ -217,6 +217,7 @@ def transcribe_payload(payload):
                     "language": language,
                     "initial_prompt": initial_prompt,
                     "fp16": device != "cpu",
+                    "vad_filter": True,
                 }
                 kwargs = {k: v for k, v in kwargs.items() if v is not None and v != ""}
                 result = model.transcribe(tmp_path, **kwargs)
@@ -224,6 +225,7 @@ def transcribe_payload(payload):
                 kwargs = {
                     "language": language or None,
                     "initial_prompt": initial_prompt or None,
+                    "vad_filter": True,
                 }
                 segments_iter, info = model.transcribe(tmp_path, **kwargs)
                 segments_list = []
@@ -244,6 +246,7 @@ def transcribe_payload(payload):
                 kwargs = {
                     "batch_size": batch_size,
                     "language": language,
+                    "vad_filter": True,
                 }
                 if initial_prompt:
                     try:

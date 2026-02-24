@@ -1,4 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, clipboard, shell, systemPreferences, dialog } = require('electron');
+// fetch() is provided in newer Node/Electron; fall back to node-fetch if necessary
+const fetch = global.fetch || require('node-fetch');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -35,6 +37,13 @@ let workerBuffer = '';
 let workerMsgId = 0;
 let workerStdioReadyPromise = null;
 let accessibilityWarningShown = false;
+
+let trayBusy = false;
+let trayTimer = null;
+let trayFrameIndex = 0;
+let trayFrames = [];
+
+let llmHistory = []; // store previous messages for context
 
 function resolveBundledPath(relPath) {
   const candidates = [];
@@ -247,7 +256,15 @@ const defaultConfig = {
   workerRequestTimeoutMs: 600000,
   workerStatusPollMs: 30000,
   whisperxCommand: 'python',
-  whisperxArgs: ['-m', 'whisperx', '--device', 'cpu']
+  whisperxArgs: ['-m', 'whisperx', '--device', 'cpu'],
+
+  // assistant / LLM settings
+  assistantName: 'Luna',            // spoken trigger words (case‑insensitive)
+  llmEndpoint: 'https://api.openai.com/v1/chat/completions',
+  llmModel: 'gpt-5-nano',
+  llmApiKey: '',
+  llmSystemPrompt: '',          // optional system prompt to guide the LLM behavior
+  assistantShortcuts: []        // list of { shortcut, prompt }
 };
 
 function getConfigPath() {
@@ -294,6 +311,69 @@ function buildTrayIcon() {
     icon.setTemplateImage(true);
   }
   return icon;
+}
+
+function buildBusyFrame(idx) {
+  const iconPath = path.join(__dirname, 'assets', `tray-busy-${idx + 1}.png`);
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    return buildTrayIcon(); // fallback
+  }
+  if (process.platform === 'darwin') {
+    icon.setTemplateImage(true);
+  }
+  return icon;
+}
+
+function buildRecordingIcon() {
+  const iconPath = path.join(__dirname, 'assets', 'tray-recording.png');
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    return buildTrayIcon(); // fallback
+  }
+  // Do not set template image for recording icon so the red color shows on macOS
+  return icon;
+}
+
+function updateTrayIcon() {
+  if (!tray) return;
+  if (trayBusy && trayFrames.length > 0) {
+    tray.setImage(trayFrames[trayFrameIndex]);
+  } else if (isRecording) {
+    tray.setImage(buildRecordingIcon());
+  } else {
+    tray.setImage(buildTrayIcon());
+  }
+}
+
+function startTrayAnimation() {
+  if (trayTimer) return;
+  trayTimer = setInterval(() => {
+    if (trayFrames.length === 0) return;
+    trayFrameIndex = (trayFrameIndex + 1) % trayFrames.length;
+    updateTrayIcon();
+  }, 150);
+}
+
+function stopTrayAnimation() {
+  if (!trayTimer) return;
+  clearInterval(trayTimer);
+  trayTimer = null;
+  trayFrameIndex = 0;
+  updateTrayIcon();
+}
+
+function setTrayBusy(flag) {
+  if (trayBusy === !!flag) return;
+  trayBusy = !!flag;
+  if (tray) {
+    tray.setToolTip(trayBusy ? 'Tray Transcriber – busy…' : 'Tray Transcriber');
+  }
+  if (trayBusy) {
+    startTrayAnimation();
+  } else {
+    stopTrayAnimation();
+  }
 }
 
 function createWindow() {
@@ -362,6 +442,23 @@ function updateTrayMenu() {
 }
 
 function registerHotkey() {
+  globalShortcut.unregisterAll();
+
+  // Register assistant shortcuts
+  if (Array.isArray(config.assistantShortcuts)) {
+    for (const item of config.assistantShortcuts) {
+      if (item && item.shortcut && item.prompt) {
+        const ok = globalShortcut.register(item.shortcut, () => {
+          console.log('[hotkey] assistant shortcut fired:', item.shortcut);
+          handleAssistantShortcut(item.prompt);
+        });
+        if (!ok) {
+          logger?.error('Failed to register assistant shortcut:', item.shortcut);
+        }
+      }
+    }
+  }
+
   if (!config.hotkey) return;
   if (config.holdToTalk) {
     setupHoldToTalk();
@@ -373,7 +470,6 @@ function registerHotkey() {
   if (config.preferKeyHook && setupToggleWithHook()) {
     return;
   }
-  globalShortcut.unregisterAll();
   const ok = globalShortcut.register(config.hotkey, () => {
     toggleRecording();
   });
@@ -387,6 +483,7 @@ function setRecording(nextState) {
   if (isRecording === nextState) return;
   isRecording = nextState;
   console.log('[record] state =>', isRecording ? 'recording' : 'stopped');
+  updateTrayIcon();
   updateTrayMenu();
   win.webContents.send('toggle-recording', { isRecording });
 }
@@ -478,7 +575,6 @@ function setupHoldToTalk() {
     updateTrayMenu();
     return;
   }
-  globalShortcut.unregisterAll();
   clearHookListeners(h);
   holdHotkeySpec = buildHoldHotkeySpec();
   if (!holdHotkeySpec) {
@@ -495,14 +591,12 @@ function setupHoldToTalk() {
     if (!matchesHoldSpec(event, holdHotkeySpec)) return;
     if (holdKeyActive) return;
     holdKeyActive = true;
-    console.log('[hotkey] hold down', summarizeEvent(event));
     setRecording(true);
   };
   const onKeyUp = (event) => {
     if (learningHotkey) return;
     if (shouldReleaseHold(event, holdHotkeySpec)) {
       holdKeyActive = false;
-      console.log('[hotkey] hold up', summarizeEvent(event));
       setRecording(false);
     }
   };
@@ -515,21 +609,18 @@ function setupHoldToTalk() {
 function setupToggleWithHook() {
   const h = tryLoadHook();
   if (!h) return false;
-  globalShortcut.unregisterAll();
   clearHookListeners(h);
   const onKeyDown = (event) => {
     if (learningHotkey) return;
     if (!matchesToggleHotkey(event)) return;
     if (toggleKeyActive) return;
     toggleKeyActive = true;
-    console.log('[hotkey] toggle down', summarizeEvent(event));
     toggleRecording();
   };
   const onKeyUp = (event) => {
     if (learningHotkey) return;
     if (!matchesToggleHotkey(event)) return;
     toggleKeyActive = false;
-    console.log('[hotkey] toggle up', summarizeEvent(event));
   };
   hookListeners = { keydown: onKeyDown, keyup: onKeyUp };
   h.on('keydown', onKeyDown);
@@ -541,7 +632,6 @@ function setupToggleWithHook() {
 function setupPressToTalkWithHook() {
   const h = tryLoadHook();
   if (!h) return false;
-  globalShortcut.unregisterAll();
   clearHookListeners(h);
   const onKeyDown = (event) => {
     if (learningHotkey) return;
@@ -1186,6 +1276,303 @@ function tryPasteViaSystem() {
   return result.status === 0;
 }
 
+// try to copy selection via system utilities (mirrors tryPasteViaSystem)
+function tryCopyViaSystem() {
+  const { spawnSync } = require('child_process');
+  const hasCmd = (cmd) => {
+    const result = spawnSync('which', [cmd]);
+    return result.status === 0;
+  };
+  const isWayland =
+    process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
+
+  if (process.platform === 'darwin') {
+    console.log('[copy] trying osascript');
+    const result = spawnSync('osascript', [
+      '-e',
+      'tell application "System Events" to keystroke "c" using command down'
+    ]);
+    if (result.status !== 0) {
+      const stderr = result.stderr ? result.stderr.toString() : '';
+      console.warn('[copy] osascript failed:', stderr || result.status);
+      if (stderr.includes('Not authorized') || stderr.includes('System Events') || stderr.includes('not authorized')) {
+        console.warn('[copy] accessibility not granted; copy disabled on macOS');
+      }
+    } else {
+      console.log('[copy] osascript succeeded');
+    }
+    return result.status === 0;
+  }
+  if (process.platform === 'win32') {
+    console.log('[copy] trying powershell SendKeys');
+    const script =
+      '$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys("^c")';
+    const result = spawnSync('powershell', ['-NoProfile', '-Command', script]);
+    if (result.status !== 0) {
+      console.warn('[copy] powershell failed:', result.stderr ? result.stderr.toString() : result.status);
+    } else {
+      console.log('[copy] powershell succeeded');
+    }
+    return result.status === 0;
+  }
+  if (hasCmd('wtype')) {
+    console.log('[copy] trying wtype');
+    const result = spawnSync('wtype', ['-M', 'ctrl', 'c', '-m', 'ctrl']);
+    if (result.status !== 0) {
+      console.warn('[copy] wtype failed:', result.stderr ? result.stderr.toString() : result.status);
+    } else {
+      console.log('[copy] wtype succeeded');
+    }
+    if (result.status === 0) return true;
+  }
+  if (isWayland && !hasCmd('wtype')) {
+    console.warn('[copy] Wayland session detected but wtype not found');
+  }
+  if (!hasCmd('xdotool')) {
+    console.warn('[copy] xdotool not found in PATH');
+    return false;
+  }
+  console.log('[copy] trying xdotool');
+  const result = spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+c']);
+  if (result.status !== 0) {
+    console.warn('[copy] xdotool failed:', result.stderr ? result.stderr.toString() : result.status);
+  } else {
+    console.log('[copy] xdotool succeeded');
+  }
+  return result.status === 0;
+}
+
+// retrieve any selected text in the active application
+async function getSelectedText() {
+  // first try primary selection (Linux)
+  try {
+    const sel = clipboard.readText('selection');
+    if (sel && sel.trim()) return sel;
+  } catch (_) {}
+
+  // fall back to copying via system keystroke and reading clipboard
+  if (tryCopyViaSystem()) {
+    // small delay to allow clipboard populate
+    await new Promise((r) => setTimeout(r, 50));
+    const txt = clipboard.readText();
+    return txt || '';
+  }
+  return '';
+}
+
+// call configured LLM endpoint with simple chat protocol
+async function callLLM(prompt, onChunk) {
+  if (!prompt) return '';
+  const endpoint = config.llmEndpoint;
+  const model = config.llmModel;
+  const key = config.llmApiKey || process.env.OPENAI_API_KEY;
+  if (!key) throw new Error('no LLM API key configured');
+
+  const messages = [];
+  if (config.llmSystemPrompt) {
+    messages.push({ role: 'system', content: config.llmSystemPrompt });
+  }
+  // Add history
+  for (const msg of llmHistory) {
+    messages.push(msg);
+  }
+  messages.push({ role: 'user', content: prompt });
+
+  const body = JSON.stringify({
+    model,
+    messages,
+    stream: !!onChunk
+  });
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${key}`
+  };
+  const resp = await fetch(endpoint, { method: 'POST', headers, body });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`LLM request failed ${resp.status}: ${text}`);
+  }
+
+  if (!onChunk) {
+    const data = await resp.json();
+    // OpenAI-style response
+    const content =
+      data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
+    return content;
+  }
+
+  // Streaming response
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let fullContent = '';
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed === 'data: [DONE]') continue;
+      if (trimmed.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(trimmed.slice(6));
+          const chunk = data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || '';
+          if (chunk) {
+            fullContent += chunk;
+            onChunk(chunk);
+          }
+        } catch (e) {
+          // ignore parse errors for incomplete chunks
+        }
+      }
+    }
+  }
+  return fullContent;
+}
+
+// determine if transcript should be handled by assistant
+function shouldHandleAsAssistant(text) {
+  if (!text || !config.assistantName) return false;
+  const trimmed = text.trim();
+  const name = config.assistantName.trim();
+  if (!name) return false;
+  const re = new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  return re.test(trimmed);
+}
+
+async function handleAssistant(text) {
+  if (!shouldHandleAsAssistant(text)) return false;
+  const trimmed = text.trim();
+  const name = config.assistantName.trim();
+  const remainder = trimmed.replace(new RegExp('^' + name, 'i'), '').trim();
+  let prompt = remainder;
+  const selection = await getSelectedText();
+  if (selection) {
+    prompt = prompt ? `${prompt}\n\n${selection}` : selection;
+  }
+  console.log('[assistant] trigger=', name, 'prompt=', prompt);
+  setTrayBusy(true);
+  try {
+    let firstChunk = true;
+    let streamingFailed = false;
+    let typedLength = 0;
+    const response = await callLLM(prompt, (chunk) => {
+      if (config.pasteMode === 'paste' && !streamingFailed) {
+        if (firstChunk) {
+          if (selection) {
+            try {
+              const robot = require('robotjs');
+              robot.keyTap('backspace');
+            } catch (e) {
+              streamingFailed = true;
+            }
+          }
+          firstChunk = false;
+        }
+        if (!streamingFailed) {
+          try {
+            const robot = require('robotjs');
+            robot.typeString(chunk);
+            typedLength += chunk.length;
+          } catch (e) {
+            streamingFailed = true;
+          }
+        }
+      }
+    });
+    console.log('[assistant] response=', response);
+    if (response) {
+      llmHistory.push({ role: 'user', content: prompt });
+      llmHistory.push({ role: 'assistant', content: response });
+      // Keep only last 10 messages (5 turns)
+      if (llmHistory.length > 10) {
+        llmHistory = llmHistory.slice(llmHistory.length - 10);
+      }
+
+      clipboard.writeText(response);
+      if (config.pasteMode === 'paste' && (firstChunk || streamingFailed)) {
+        // If streaming failed or wasn't used, paste the remaining part
+        const remaining = response.substring(typedLength);
+        if (remaining) {
+          clipboard.writeText(remaining);
+          tryPaste(remaining);
+          // Restore full response to clipboard after pasting
+          setTimeout(() => clipboard.writeText(response), 500);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[assistant] error', err);
+    return false;
+  } finally {
+    setTrayBusy(false);
+  }
+  return true;
+}
+
+async function handleAssistantShortcut(basePrompt) {
+  let prompt = basePrompt;
+  const selection = await getSelectedText();
+  if (selection) {
+    prompt = prompt ? `${prompt}\n\n${selection}` : selection;
+  }
+  console.log('[assistant] shortcut prompt=', prompt);
+  setTrayBusy(true);
+  try {
+    let firstChunk = true;
+    let streamingFailed = false;
+    let typedLength = 0;
+    const response = await callLLM(prompt, (chunk) => {
+      if (config.pasteMode === 'paste' && !streamingFailed) {
+        if (firstChunk) {
+          if (selection) {
+            try {
+              const robot = require('robotjs');
+              robot.keyTap('backspace');
+            } catch (e) {
+              streamingFailed = true;
+            }
+          }
+          firstChunk = false;
+        }
+        if (!streamingFailed) {
+          try {
+            const robot = require('robotjs');
+            robot.typeString(chunk);
+            typedLength += chunk.length;
+          } catch (e) {
+            streamingFailed = true;
+          }
+        }
+      }
+    });
+    console.log('[assistant] shortcut response=', response);
+    if (response) {
+      llmHistory.push({ role: 'user', content: prompt });
+      llmHistory.push({ role: 'assistant', content: response });
+      if (llmHistory.length > 10) {
+        llmHistory = llmHistory.slice(llmHistory.length - 10);
+      }
+      clipboard.writeText(response);
+      if (config.pasteMode === 'paste' && (firstChunk || streamingFailed)) {
+        const remaining = response.substring(typedLength);
+        if (remaining) {
+          clipboard.writeText(remaining);
+          tryPaste(remaining);
+          setTimeout(() => clipboard.writeText(response), 500);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[assistant] shortcut error', err);
+  } finally {
+    setTrayBusy(false);
+  }
+}
+
 ipcMain.on('recording-complete', async (_event, payload) => {
   const size = payload && typeof payload.size === 'number' ? payload.size : (payload?.buffer?.length || 0);
   if (!payload || !payload.buffer || size < config.minRecordingBytes) {
@@ -1208,6 +1595,7 @@ async function processTranscribeQueue() {
   const next = transcribeQueue.shift();
   if (!next) return;
   transcribeRunning = true;
+  setTrayBusy(true);
   try {
     console.log('[transcribe] start', { audioPath: next.audioPath, pending: transcribeQueue.length });
     const rawText = await runWhisperX(next.audioPath);
@@ -1215,10 +1603,14 @@ async function processTranscribeQueue() {
     const text = normalizeTranscript(rawText);
     console.log('[transcript] len=', text.length, 'preview=', text.slice(0, 120));
     if (text) {
-      const pasted = tryPaste(text);
-      console.log('[paste] result=', pasted ? 'pasted' : 'copied');
-      if (!pasted) {
-        clipboard.writeText(text);
+      // check for assistant command first
+      const handled = await handleAssistant(text);
+      if (!handled) {
+        const pasted = tryPaste(text);
+        console.log('[paste] result=', pasted ? 'pasted' : 'copied');
+        if (!pasted) {
+          clipboard.writeText(text);
+        }
       }
     } else {
       console.log('[transcript] empty, skipping paste');
@@ -1226,6 +1618,7 @@ async function processTranscribeQueue() {
   } catch (err) {
     console.error('[transcribe] error', err);
   } finally {
+    setTrayBusy(false);
     fs.unlink(next.audioPath, () => {});
     transcribeRunning = false;
     if (transcribeQueue.length) {
@@ -1330,8 +1723,16 @@ app.whenReady().then(() => {
 
   Menu.setApplicationMenu(null);
 
+  trayFrames = [
+    buildBusyFrame(0),
+    buildBusyFrame(1),
+    buildBusyFrame(2),
+    buildBusyFrame(3)
+  ];
+
   tray = new Tray(buildTrayIcon());
   tray.setToolTip('Tray Transcriber');
+  updateTrayIcon();
   updateTrayMenu();
 
   registerHotkey();
