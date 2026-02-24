@@ -1,12 +1,18 @@
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
+import util from 'node:util';
+
+const require = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, clipboard, shell, systemPreferences, dialog } = require('electron');
 // fetch() is provided in newer Node/Electron; fall back to node-fetch if necessary
 const fetch = global.fetch || require('node-fetch');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const { spawn } = require('child_process');
-const http = require('http');
-const util = require('util');
 
 let tray = null;
 let win = null;
@@ -383,14 +389,14 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(APP_ROOT, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
     }
   });
 
-  win.loadFile(path.join(__dirname, 'index.html'));
+  win.loadFile(path.join(APP_ROOT, 'index.html'));
   win.setMenuBarVisibility(false);
 }
 
@@ -406,7 +412,7 @@ function createConfigWindow() {
     resizable: true,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(APP_ROOT, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -415,7 +421,7 @@ function createConfigWindow() {
   configWin.on('closed', () => {
     configWin = null;
   });
-  configWin.loadFile(path.join(__dirname, 'config.html'));
+  configWin.loadFile(path.join(APP_ROOT, 'config.html'));
   configWin.setMenuBarVisibility(false);
 }
 
@@ -432,7 +438,7 @@ function updateTrayMenu() {
     { label: 'Learn Hold-to-Talk Hotkey', click: () => learnHoldHotkey() },
     { type: 'separator' },
     { label: 'Settings', click: () => createConfigWindow() },
-    { label: 'Worker Status (log)', click: () => fetchWorkerStatus() },
+    { label: 'Worker Status (log)', click: () => fetchWorkerStatus('menu') },
     { label: 'Open Config', click: () => shell.openPath(getConfigPath()) },
     { label: 'Open Config Folder', click: () => shell.openPath(app.getPath('userData')) },
     { type: 'separator' },
@@ -918,7 +924,7 @@ async function runWhisperX(audioPath) {
     args.push('--no_align');
   }
 
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const env = buildWorkerEnv();
     const proc = spawn(resolvePythonCommand(), args, { stdio: 'inherit', env });
     proc.on('error', reject);
@@ -1121,7 +1127,7 @@ async function transcribeViaWorker(audioPath) {
   const transport = getWorkerTransport();
   if (transport === 'stdio') {
     const timeoutMs = config.workerRequestTimeoutMs || 30000;
-    const result = await sendWorkerMessage('transcribe', payload, timeoutMs);
+    const result = await sendWorkerMessage('transcribe', payload, timeoutMs) as { segments_len?: number; text?: string };
     if (result && typeof result.segments_len === 'number') {
       logger?.debug('[worker] segments_len=', String(result.segments_len));
     }
@@ -1202,7 +1208,7 @@ function tryPaste(text) {
   try {
     console.log('[paste] trying robotjs');
     const robot = require('robotjs');
-    const modifier = process.platform === 'darwin' ? 'command' : 'control';
+    const modifier = 'control';
     robot.keyTap('v', modifier);
     console.log('[paste] robotjs succeeded');
     return true;
@@ -1213,7 +1219,6 @@ function tryPaste(text) {
 }
 
 function tryPasteViaSystem() {
-  const { spawnSync } = require('child_process');
   const hasCmd = (cmd) => {
     const result = spawnSync('which', [cmd]);
     return result.status === 0;
@@ -1278,7 +1283,6 @@ function tryPasteViaSystem() {
 
 // try to copy selection via system utilities (mirrors tryPasteViaSystem)
 function tryCopyViaSystem() {
-  const { spawnSync } = require('child_process');
   const hasCmd = (cmd) => {
     const result = spawnSync('which', [cmd]);
     return result.status === 0;
@@ -1821,7 +1825,7 @@ async function warmupWorker() {
     }
     return;
   }
-  await new Promise((resolve) => {
+  await new Promise<void>((resolve) => {
     const body = JSON.stringify(payload);
     const req = http.request(
       {
@@ -1848,7 +1852,7 @@ async function warmupWorker() {
   });
 }
 
-function fetchWorkerStatus(context) {
+function fetchWorkerStatus(context = '') {
   if (!config.useWorker) {
     logger?.info('[worker] status: disabled');
     return;

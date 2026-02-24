@@ -1,26 +1,28 @@
-const $ = (id) => document.getElementById(id);
+/// <reference path="./types/tray-transcriber.d.ts" />
 
-function setValue(id, value) {
-  const el = $(id);
+const $ = (id: string): HTMLElement | null => document.getElementById(id);
+
+function setValue(id: string, value: unknown) {
+  const el = $(id) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
   if (!el) return;
   if (el.tagName === 'SELECT') {
     el.value = String(value);
   } else {
-    el.value = value ?? '';
+    el.value = value == null ? '' : String(value);
   }
 }
 
-function getBool(id) {
-  return $(id).value === 'true';
+function getBool(id: string) {
+  return (($(id) as HTMLSelectElement | null)?.value || 'false') === 'true';
 }
 
-function getNumber(id) {
-  const raw = $(id).value;
+function getNumber(id: string) {
+  const raw = (($(id) as HTMLInputElement | null)?.value || '').trim();
   const num = parseInt(raw, 10);
   return Number.isFinite(num) ? num : undefined;
 }
 
-function normalizeDictionary(items) {
+function normalizeDictionary(items: unknown) {
   if (!Array.isArray(items)) return [];
   return items
     .map((entry) => {
@@ -30,8 +32,8 @@ function normalizeDictionary(items) {
         return term ? { term, description: '' } : null;
       }
       if (typeof entry === 'object') {
-        const term = String(entry.term || entry.word || '').trim();
-        const description = String(entry.description || '').trim();
+        const term = String((entry as { term?: string; word?: string }).term || (entry as { term?: string; word?: string }).word || '').trim();
+        const description = String((entry as { description?: string }).description || '').trim();
         return term ? { term, description } : null;
       }
       return null;
@@ -39,7 +41,7 @@ function normalizeDictionary(items) {
     .filter(Boolean);
 }
 
-function setDictionaryList(items) {
+function setDictionaryList(items: unknown) {
   const list = $('dictionaryList');
   if (!list) return;
   list.innerHTML = '';
@@ -48,10 +50,10 @@ function setDictionaryList(items) {
     addDictionaryRow({ term: '', description: '' });
     return;
   }
-  normalized.forEach(addDictionaryRow);
+  normalized.forEach((item) => addDictionaryRow(item as { term: string; description: string }));
 }
 
-function addDictionaryRow(item) {
+function addDictionaryRow(item: { term?: string; description?: string }) {
   const list = $('dictionaryList');
   if (!list) return;
   const row = document.createElement('div');
@@ -85,11 +87,11 @@ function getDictionaryList() {
   const list = $('dictionaryList');
   if (!list) return [];
   const rows = list.querySelectorAll('.dict-row');
-  const items = [];
+  const items: Array<{ term: string; description: string }> = [];
   rows.forEach((row) => {
     const inputs = row.querySelectorAll('input');
-    const term = inputs[0]?.value.trim() || '';
-    const description = inputs[1]?.value.trim() || '';
+    const term = (inputs[0] as HTMLInputElement | undefined)?.value.trim() || '';
+    const description = (inputs[1] as HTMLInputElement | undefined)?.value.trim() || '';
     if (term) {
       items.push({ term, description });
     }
@@ -97,7 +99,7 @@ function getDictionaryList() {
   return items;
 }
 
-function setCorrectionsList(items) {
+function setCorrectionsList(items: unknown) {
   const list = $('correctionsList');
   if (!list) return;
   list.innerHTML = '';
@@ -105,10 +107,10 @@ function setCorrectionsList(items) {
     addCorrectionRow({ from: '', to: '' });
     return;
   }
-  items.forEach(addCorrectionRow);
+  items.forEach((item) => addCorrectionRow(item as { from: string; to: string }));
 }
 
-function addCorrectionRow(item) {
+function addCorrectionRow(item: { from?: string; to?: string }) {
   const list = $('correctionsList');
   if (!list) return;
   const row = document.createElement('div');
@@ -142,17 +144,17 @@ function getCorrectionsList() {
   const list = $('correctionsList');
   if (!list) return [];
   const rows = list.querySelectorAll('.dict-row');
-  const items = [];
+  const items: Array<{ from: string; to: string }> = [];
   rows.forEach((row) => {
     const inputs = row.querySelectorAll('input');
-    const from = inputs[0]?.value.trim() || '';
-    const to = inputs[1]?.value.trim() || '';
+    const from = (inputs[0] as HTMLInputElement | undefined)?.value.trim() || '';
+    const to = (inputs[1] as HTMLInputElement | undefined)?.value.trim() || '';
     if (from && to) items.push({ from, to });
   });
   return items;
 }
 
-function setShortcutsList(items) {
+function setShortcutsList(items: unknown) {
   const list = $('shortcutsList');
   if (!list) return;
   list.innerHTML = '';
@@ -160,10 +162,10 @@ function setShortcutsList(items) {
     addShortcutRow({ shortcut: '', prompt: '' });
     return;
   }
-  items.forEach(addShortcutRow);
+  items.forEach((item) => addShortcutRow(item as { shortcut: string; prompt: string }));
 }
 
-function addShortcutRow(item) {
+function addShortcutRow(item: { shortcut?: string; prompt?: string }) {
   const list = $('shortcutsList');
   if (!list) return;
   const row = document.createElement('div');
@@ -197,11 +199,11 @@ function getShortcutsList() {
   const list = $('shortcutsList');
   if (!list) return [];
   const rows = list.querySelectorAll('.dict-row');
-  const items = [];
+  const items: Array<{ shortcut: string; prompt: string }> = [];
   rows.forEach((row) => {
     const inputs = row.querySelectorAll('input');
-    const shortcut = inputs[0]?.value.trim() || '';
-    const prompt = inputs[1]?.value.trim() || '';
+    const shortcut = (inputs[0] as HTMLInputElement | undefined)?.value.trim() || '';
+    const prompt = (inputs[1] as HTMLInputElement | undefined)?.value.trim() || '';
     if (shortcut && prompt) items.push({ shortcut, prompt });
   });
   return items;
@@ -253,50 +255,50 @@ function gatherConfig() {
   const assistantShortcuts = getShortcutsList();
 
   return {
-    hotkey: $('hotkey').value.trim(),
+    hotkey: (($("hotkey") as HTMLInputElement | null)?.value || '').trim(),
     pressToTalk: getBool('pressToTalk'),
     holdToTalk: getBool('holdToTalk'),
-    pasteMode: $('pasteMode').value,
-    asrEngine: $('asrEngine').value,
-    model: $('model').value,
-    language: $('language').value.trim(),
-    device: $('device').value,
-    computeType: $('computeType').value,
+    pasteMode: (($("pasteMode") as HTMLSelectElement | null)?.value || ''),
+    asrEngine: (($("asrEngine") as HTMLSelectElement | null)?.value || ''),
+    model: (($("model") as HTMLSelectElement | null)?.value || ''),
+    language: (($("language") as HTMLInputElement | null)?.value || '').trim(),
+    device: (($("device") as HTMLSelectElement | null)?.value || ''),
+    computeType: (($("computeType") as HTMLSelectElement | null)?.value || ''),
     batchSize: getNumber('batchSize') || 4,
     noAlign: getBool('noAlign'),
     dictionary,
     dictionaryCorrections,
     includeDictionaryInPrompt: getBool('includeDictionaryInPrompt'),
     includeDictionaryDescriptions: getBool('includeDictionaryDescriptions'),
-    prompt: $('prompt').value,
-    promptMode: $('promptMode').value,
+    prompt: (($("prompt") as HTMLTextAreaElement | null)?.value || ''),
+    promptMode: (($("promptMode") as HTMLSelectElement | null)?.value || ''),
     useWorker: getBool('useWorker'),
     workerWarmup: getBool('workerWarmup'),
-    workerHost: $('workerHost').value.trim() || '127.0.0.1',
+    workerHost: (($("workerHost") as HTMLInputElement | null)?.value || '').trim() || '127.0.0.1',
     workerPort: getNumber('workerPort') || 8765,
-    workerTransport: $('workerTransport').value,
+    workerTransport: (($("workerTransport") as HTMLSelectElement | null)?.value || ''),
     workerRequestTimeoutMs: getNumber('workerRequestTimeoutMs') || 600000,
     minRecordingBytes: getNumber('minRecordingBytes') || 200,
     workerStatusPollMs: getNumber('workerStatusPollMs') || 30000,
     holdStopOnModifierRelease: getBool('holdStopOnModifierRelease'),
-    logLevel: $('logLevel').value,
-    pythonPath: $('pythonPath').value.trim(),
+    logLevel: (($("logLevel") as HTMLSelectElement | null)?.value || ''),
+    pythonPath: (($("pythonPath") as HTMLInputElement | null)?.value || '').trim(),
     disableCuda: getBool('disableCuda'),
     forceNoWeightsOnlyLoad: getBool('forceNoWeightsOnlyLoad'),
-    assistantName: $('assistantName').value.trim(),
-    llmEndpoint: $('llmEndpoint').value.trim(),
-    llmModel: $('llmModel').value.trim(),
-    llmApiKey: $('llmApiKey').value.trim(),
-    llmSystemPrompt: $('llmSystemPrompt').value.trim(),
+    assistantName: (($("assistantName") as HTMLInputElement | null)?.value || '').trim(),
+    llmEndpoint: (($("llmEndpoint") as HTMLInputElement | null)?.value || '').trim(),
+    llmModel: (($("llmModel") as HTMLInputElement | null)?.value || '').trim(),
+    llmApiKey: (($("llmApiKey") as HTMLInputElement | null)?.value || '').trim(),
+    llmSystemPrompt: (($("llmSystemPrompt") as HTMLTextAreaElement | null)?.value || '').trim(),
     assistantShortcuts
   };
 }
 
-$('saveBtn').addEventListener('click', () => {
+($('saveBtn') as HTMLButtonElement | null)?.addEventListener('click', () => {
   window.trayTranscriber.updateConfig(gatherConfig());
 });
 
-$('closeBtn').addEventListener('click', () => {
+($('closeBtn') as HTMLButtonElement | null)?.addEventListener('click', () => {
   window.close();
 });
 
@@ -311,7 +313,7 @@ tabButtons.forEach((btn) => {
     tabButtons.forEach((b) => b.classList.toggle('active', b === btn));
     tabPanels.forEach((panel) => {
       const isTarget = panel.getAttribute('data-panel') === target;
-      panel.hidden = !isTarget;
+      (panel as HTMLElement).hidden = !isTarget;
     });
   });
 });

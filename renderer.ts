@@ -1,11 +1,13 @@
-let mediaRecorder = null;
-let chunks = [];
+/// <reference path="./types/tray-transcriber.d.ts" />
+
+let mediaRecorder: MediaRecorder | null = null;
+let chunks: BlobPart[] = [];
 let desiredRecording = false;
 let startInFlight = false;
 let cancelOnStart = false;
 let recordingStartedAt = 0;
 
-function debug(message, data) {
+function debug(message: string, data?: unknown) {
   console.log(message, data || '');
   if (window.trayTranscriber && typeof window.trayTranscriber.log === 'function') {
     window.trayTranscriber.log(message, data);
@@ -17,7 +19,7 @@ async function startRecording() {
   startInFlight = true;
   cancelOnStart = false;
   debug('[renderer] startRecording requested');
-  let stream = null;
+  let stream: MediaStream | null = null;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
@@ -31,8 +33,8 @@ async function startRecording() {
     startInFlight = false;
     return;
   }
-  let options = { mimeType: 'audio/webm;codecs=opus' };
-  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+  let options: MediaRecorderOptions = { mimeType: 'audio/webm;codecs=opus' };
+  if (!MediaRecorder.isTypeSupported(options.mimeType || '')) {
     options = {};
   }
   mediaRecorder = new MediaRecorder(stream, options);
@@ -83,7 +85,7 @@ function stopRecording() {
   mediaRecorder = null;
 }
 
-window.trayTranscriber.onToggleRecording(async ({ isRecording }) => {
+window.trayTranscriber.onToggleRecording(async ({ isRecording }: { isRecording: boolean }) => {
   if (isRecording) {
     try {
       desiredRecording = true;
