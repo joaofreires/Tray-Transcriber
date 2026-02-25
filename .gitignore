@@ -10,6 +10,7 @@ pnpm-debug.log*
 
 # Build artifacts
 /dist/
+/dist-ts/
 /out/
 /build/
 /release/

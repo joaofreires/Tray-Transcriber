@@ -11,10 +11,26 @@ A system‑tray transcription app built with Electron. Hold a hotkey to record y
 - Cross‑platform paste fallback (clipboard, wtype/xdotool/robotjs)
 
 ## Quick Start (Dev)
-```bash
-npm install
-npm start
-```
+
+1. install dependencies:
+   ```bash
+   npm install
+   ```
+2. run the renderer + main process in watch mode. the easiest way to get an
+   interactive dev environment with live reload is:
+   ```bash
+   npm run dev:all
+   ```
+
+   - `npm run dev` will only start Vite for the renderer.
+   - `npm run dev:main` watches the TypeScript main process.
+   - `npm run dev:electron` will rebuild and launch Electron once the renderer
+     server is available (used automatically by `dev:all`).
+
+   You can also spin up pieces individually if desired.
+
+(Previously `npm start` launched a production build; it is still available but
+isn't typically used during development.)
 
 Open the tray menu → **Settings** to configure engine, model, prompt, dictionary, and paste behavior.
 
@@ -79,14 +95,19 @@ Transport options:
 - `stdio`: worker communicates over stdin/stdout (no HTTP server).
 
 ## Bundled Build (Linux/macOS)
-Bundle a minimal Python venv with **faster‑whisper** + ffmpeg.
+
+Bundle a minimal Python venv with **faster‑whisper** + ffmpeg. run the
+build script first so TypeScript sources are compiled:
 
 ```bash
 npm install
-npm run bundle:prep
-npm run dist:linux   # AppImage
-npm run dist:mac     # dmg
+npm run build:app         # compile both main + renderer
+npm run bundle:prep       # prepare python/ffmpeg
+npm run dist:linux        # AppImage
+npm run dist:mac          # dmg
 ```
+
+The produced artifacts land in `dist/`.
 
 The AppImage/Dmg is generated in `dist/`.
 
@@ -98,6 +119,10 @@ The AppImage/Dmg is generated in `dist/`.
 ## Troubleshooting
 - If no paste occurs, text is still copied to clipboard.
 - Check logs in `~/.config/TrayTranscriber/logs/app.log` (or macOS equivalent).
+- If the build process complains about `@tailwindcss/oxide` native binding
+  (especially on CI), re-running `npm install` or manually rebuilding with
+  `npm rebuild @tailwindcss/oxide` usually resolves it. A postinstall script is
+  included to automate this.
 - If worker hangs on large models, try smaller model or GPU.
 
 ## License
