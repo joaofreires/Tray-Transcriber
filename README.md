@@ -119,6 +119,10 @@ The AppImage/Dmg is generated in `dist/`.
 ## Troubleshooting
 - If no paste occurs, text is still copied to clipboard.
 - Check logs in `~/.config/TrayTranscriber/logs/app.log` (or macOS equivalent).
+- If the build process complains about `@tailwindcss/oxide` native binding
+  (especially on CI), re-running `npm install` or manually rebuilding with
+  `npm rebuild @tailwindcss/oxide` usually resolves it. A postinstall script is
+  included to automate this.
 - If worker hangs on large models, try smaller model or GPU.
 
 ## License

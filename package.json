@@ -15,6 +15,7 @@
     "dev:all": "cross-env CHOKIDAR_USEPOLLING=true CHOKIDAR_INTERVAL=1000 concurrently -k \"npm:dev\" \"npm:dev:main\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
     "test": "vitest",
     "start": "npm run build:app && node scripts/start.cjs",
+    "postinstall": "npm rebuild @tailwindcss/oxide || true",
     "bundle:prep": "node scripts/bundle_prepare.cjs",
     "dist:linux": "npm run bundle:prep && electron-builder --linux AppImage",
     "dist:mac": "npm run bundle:prep && electron-builder --mac"
