@@ -3,438 +3,70 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
-import http from 'node:http';
-import util from 'node:util';
+
+import {
+  initElectron, setAPP_ROOT, setMainDirname, setConfig, setFetch,
+  config, ipcMain, clipboard, webContents, app, Menu, Tray, nativeImage, globalShortcut, shell
+} from './src/main/ctx.js';
+import { getMainState, setMainState } from './src/store/main-store.js';
+import { loadConfig, saveConfig, getConfigPath } from './src/main/config-manager.js';
+import { createLogger, installConsoleLogger } from './src/main/logger.js';
+import { buildTrayIcon, updateTrayIcon, setTrayBusy, loadBusyFrames } from './src/main/tray-manager.js';
+import { createWindow, createConfigWindow, reloadAllWindows } from './src/main/windows.js';
+import { initHotkeys, registerHotkey, learnHoldHotkey, toggleHoldToTalk } from './src/main/hotkeys.js';
+import { ensureWorker, warmupWorker, restartWorker, runWhisperX, fetchWorkerStatus, killWorker } from './src/main/worker-manager.js';
+import { handleAssistant, handleAssistantShortcut } from './src/main/assistant.js';
+import { tryPaste } from './src/main/paste.js';
+import { normalizeTranscript } from './src/main/transcript.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, clipboard, shell, systemPreferences, dialog } = require('electron');
-// fetch() is provided in newer Node/Electron; fall back to node-fetch if necessary
-const fetch = global.fetch || require('node-fetch');
 
-let tray = null;
-let win = null;
-let configWin = null;
-let isRecording = false;
-let config = null;
-let lastHotkeyAt = 0;
-let hotkeyGuard = false;
-let hook = null;
-let learningHotkey = false;
-let holdKeyActive = false;
-let toggleKeyActive = false;
-let hookListeners = { keydown: null, keyup: null };
-let hookKeyMap = null;
-let holdHotkeySpec = null;
-let modifierKeycodes = new Set();
-let workerProc = null;
-let workerPromise = null;
-let workerReady = false;
-let workerWarmupKey = null;
-let transcribeQueue = [];
-let transcribeRunning = false;
-let logger = null;
-let consolePatched = false;
-let workerReadyResolve = null;
-let workerPending = new Map();
-let workerBuffer = '';
-let workerMsgId = 0;
-let workerStdioReadyPromise = null;
-let accessibilityWarningShown = false;
-
-let trayBusy = false;
-let trayTimer = null;
-let trayFrameIndex = 0;
-let trayFrames = [];
-
-let llmHistory = []; // store previous messages for context
-
-function resolveBundledPath(relPath) {
-  const candidates = [];
-  if (app && app.isPackaged) {
-    candidates.push(path.join(process.resourcesPath, relPath));
-    candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', relPath));
-  }
-  candidates.push(path.join(__dirname, relPath));
-  candidates.push(path.join(__dirname, 'bundle', relPath));
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
+// ── APP_ROOT setup ────────────────────────────────────────────────────────────
+let ROOT = __dirname;
+if (process.env.APP_ROOT) ROOT = process.env.APP_ROOT;
+if (!process.env.NODE_ENV || process.env.NODE_ENV === 'development') {
+  try { ROOT = process.cwd(); } catch (_) {}
 }
+setAPP_ROOT(ROOT);
+setMainDirname(__dirname);
 
-function resolvePythonCommand() {
-  if (config && config.pythonPath) {
-    const custom = config.pythonPath.trim();
-    if (custom) return custom;
-  }
-  const pyPath = resolveBundledPath(path.join('python', 'bin', 'python'));
-  if (pyPath) {
-    try {
-      const stat = fs.statSync(pyPath);
-      if (stat.isFile()) return pyPath;
-    } catch (_) {}
-  }
-  return config.whisperxCommand || 'python';
-}
-
-function resolveFfmpegDir() {
-  const ffmpegPath = resolveBundledPath(path.join('ffmpeg', 'ffmpeg'));
-  if (!ffmpegPath) return null;
-  return path.dirname(ffmpegPath);
-}
-
-function resolveWorkerScriptPath() {
-  const bundled = resolveBundledPath(path.join('worker', 'worker.py'));
-  if (bundled) return bundled;
-  const unpacked = resolveBundledPath(path.join('python', 'worker.py'));
-  if (unpacked) return unpacked;
-  const dev = path.join(__dirname, 'python', 'worker.py');
-  if (fs.existsSync(dev)) return dev;
-  return null;
-}
-
-function getWorkerTransport() {
-  const value = config && config.workerTransport ? String(config.workerTransport).toLowerCase() : 'http';
-  return value === 'stdio' ? 'stdio' : 'http';
-}
-
-function buildWorkerEnv() {
-  const env = { ...process.env };
-  const ffmpegDir = resolveFfmpegDir();
-  if (ffmpegDir) {
-    env.PATH = `${ffmpegDir}${path.delimiter}${env.PATH || ''}`;
-  }
-  if ((config.disableCuda && config.device !== 'gpu') || config.device === 'cpu') {
-    env.CUDA_VISIBLE_DEVICES = '';
-    env.NVIDIA_VISIBLE_DEVICES = 'none';
-  }
-  if (config.forceNoWeightsOnlyLoad) {
-    env.TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = '1';
-  }
-  if (logger && logger.filePath) {
-    env.TRANSCRIBER_LOG_PATH = logger.filePath;
-  }
-  if (logger && logger.levelName) {
-    env.TRANSCRIBER_LOG_LEVEL = logger.levelName;
-  }
-  return env;
-}
-
-function createLogger() {
-  const levels = { silent: 0, error: 1, info: 2, debug: 3 };
-  const configured = (config && config.logLevel) || 'auto';
-  const levelName = configured === 'auto'
-    ? (app && app.isPackaged ? 'error' : 'debug')
-    : configured;
-  const level = levels[levelName] ?? levels.error;
-  const logDir = path.join(app.getPath('userData'), 'logs');
-  fs.mkdirSync(logDir, { recursive: true });
-  const filePath = path.join(logDir, 'app.log');
-
-  const writeLine = (msg) => {
-    try {
-      fs.appendFileSync(filePath, msg + '\n');
-    } catch (_) {}
-  };
-
-  const formatArg = (arg) => {
-    if (typeof arg === 'string') return arg;
-    if (arg instanceof Error) {
-      return arg.stack || arg.message || String(arg);
-    }
-    try {
-      return util.inspect(arg, { depth: 4, breakLength: 120, compact: true });
-    } catch (_) {
-      return String(arg);
-    }
-  };
-
-  const format = (lvl, args) => {
-    const line = `[${new Date().toISOString()}] [${lvl}] ${args.map(formatArg).join(' ')}`;
-    return line;
-  };
-
-  return {
-    levelName,
-    filePath,
-    error: (...args) => {
-      if (level >= levels.error) {
-        const line = format('ERROR', args);
-        writeLine(line);
-        if (!app.isPackaged) process.stderr.write(line + '\n');
-      }
-    },
-    info: (...args) => {
-      if (level >= levels.info) {
-        const line = format('INFO', args);
-        writeLine(line);
-        if (!app.isPackaged) process.stdout.write(line + '\n');
-      }
-    },
-    debug: (...args) => {
-      if (level >= levels.debug) {
-        const line = format('DEBUG', args);
-        writeLine(line);
-        if (!app.isPackaged) process.stdout.write(line + '\n');
-      }
-    }
-  };
-}
-
-function installConsoleLogger() {
-  if (consolePatched || !logger) return;
-  consolePatched = true;
-  console.log = (...args) => logger.info(...args);
-  console.warn = (...args) => logger.error(...args);
-  console.error = (...args) => logger.error(...args);
-  logger.debug('[log] console patched', { file: logger.filePath, level: logger.levelName });
-}
-
-function hasAccessibilityPermission() {
-  if (process.platform !== 'darwin') return true;
+// ── electron-reload (dev only) ────────────────────────────────────────────────
+if (!process.env.NODE_ENV || process.env.NODE_ENV === 'development') {
   try {
-    // false = do not prompt automatically; we show our own message instead.
-    return systemPreferences.isTrustedAccessibilityClient(false);
-  } catch (err) {
-    console.warn('[perm] accessibility check failed:', err && err.message ? err.message : err);
-    return true;
-  }
+    require('electron-reload')(__dirname, {
+      electron: require(path.join(__dirname, 'node_modules', 'electron')),
+      ignored: ['**/node_modules/**', '**/dist-ts/**', '**/dist/**', '**/bundle/**']
+    });
+    console.debug('[dev] electron-reload enabled on', __dirname);
+  } catch (_) {}
 }
 
-function showAccessibilityWarning() {
-  if (accessibilityWarningShown || process.platform !== 'darwin') return;
-  accessibilityWarningShown = true;
-  const message = 'Accessibility permission is disabled. Global hotkeys and paste automation may not work.';
-  const detail = 'Enable TrayTranscriber (or Terminal/Electron during development) under System Settings → Privacy & Security → Accessibility. Without it, the app will fall back to limited hotkeys.';
-  dialog
-    .showMessageBox({
-      type: 'warning',
-      buttons: ['OK', 'Open Settings'],
-      defaultId: 0,
-      cancelId: 0,
-      title: 'TrayTranscriber Permission',
-      message,
-      detail
-    })
-    .then(({ response }) => {
-      if (response === 1) {
-        shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility');
-      }
-    })
-    .catch(() => {});
-}
+// ── Electron ──────────────────────────────────────────────────────────────────
+const electronApis = require('electron');
+initElectron(electronApis);
+setFetch((global as any).fetch || require('node-fetch'));
 
-const defaultConfig = {
-  hotkey: 'CommandOrControl+Shift+Space',
-  holdToTalk: true,
-  holdHotkey: null,
-  preferKeyHook: true,
-  pressToTalk: true,
-  holdStopOnModifierRelease: false,
-  pasteMode: 'clipboard',
-  dictionary: ["OpenAI", "WhisperX"],
-  includeDictionaryInPrompt: true,
-  includeDictionaryDescriptions: false,
-  dictionaryCorrections: [],
-  prompt: '',
-  promptMode: 'append',
-  logLevel: 'auto',
-  pythonPath: '',
-  asrEngine: 'faster-whisper',
-  device: 'default',
-  language: 'en',
-  model: 'small',
-  disableCuda: true,
-  forceNoWeightsOnlyLoad: true,
-  computeType: 'int8',
-  batchSize: 4,
-  noAlign: true,
-  minRecordingBytes: 200,
-  useWorker: true,
-  workerHost: '127.0.0.1',
-  workerPort: 8765,
-  workerTransport: 'http',
-  workerStartupTimeoutMs: 15000,
-  workerWarmup: true,
-  workerRequestTimeoutMs: 600000,
-  workerStatusPollMs: 30000,
-  whisperxCommand: 'python',
-  whisperxArgs: ['-m', 'whisperx', '--device', 'cpu'],
-
-  // assistant / LLM settings
-  assistantName: 'Luna',            // spoken trigger words (case‑insensitive)
-  llmEndpoint: 'https://api.openai.com/v1/chat/completions',
-  llmModel: 'gpt-5-nano',
-  llmApiKey: '',
-  llmSystemPrompt: '',          // optional system prompt to guide the LLM behavior
-  assistantShortcuts: []        // list of { shortcut, prompt }
-};
-
-function getConfigPath() {
-  return path.join(app.getPath('userData'), 'config.json');
-}
-
-function loadConfig() {
-  const configPath = getConfigPath();
-  if (!fs.existsSync(configPath)) {
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-    return { ...defaultConfig };
-  }
-  try {
-    const raw = fs.readFileSync(configPath, 'utf8');
-    if (!raw || !raw.trim()) {
-      fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-      return { ...defaultConfig };
-    }
-    return { ...defaultConfig, ...JSON.parse(raw) };
-  } catch (err) {
-    try {
-      fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-    } catch (_) {}
-    return { ...defaultConfig };
-  }
-}
-
-function saveConfig(newConfig) {
-  const configPath = getConfigPath();
-  fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2));
-}
-
-function buildTrayIcon() {
-  const iconPath = path.join(__dirname, 'assets', 'tray.png');
-  let icon = nativeImage.createFromPath(iconPath);
-  if (icon.isEmpty()) {
-    const dataUrl =
-      'data:image/png;base64,' +
-      'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAnklEQVRYR+2W0Q3AIAwE3f9r2Y3o0gQx0QmE3AqQYH8tI0SxQmWQw+u0o5gJp5QbA5b6mM4qgF4cS7gQ1z3F8q1Ew8e1UoY4cG4cBv5r8+0oYcY9mY0J8Xz8R6D8wGQp5+8Jc6HkL8Xj7yC2P8G8o+gC5b0bZ2jP2sAAAAASUVORK5CYII=';
-    icon = nativeImage.createFromDataURL(dataUrl);
-  }
-  if (process.platform === 'darwin') {
-    icon.setTemplateImage(true);
-  }
-  return icon;
-}
-
-function buildBusyFrame(idx) {
-  const iconPath = path.join(__dirname, 'assets', `tray-busy-${idx + 1}.png`);
-  let icon = nativeImage.createFromPath(iconPath);
-  if (icon.isEmpty()) {
-    return buildTrayIcon(); // fallback
-  }
-  if (process.platform === 'darwin') {
-    icon.setTemplateImage(true);
-  }
-  return icon;
-}
-
-function buildRecordingIcon() {
-  const iconPath = path.join(__dirname, 'assets', 'tray-recording.png');
-  let icon = nativeImage.createFromPath(iconPath);
-  if (icon.isEmpty()) {
-    return buildTrayIcon(); // fallback
-  }
-  // Do not set template image for recording icon so the red color shows on macOS
-  return icon;
-}
-
-function updateTrayIcon() {
-  if (!tray) return;
-  if (trayBusy && trayFrames.length > 0) {
-    tray.setImage(trayFrames[trayFrameIndex]);
-  } else if (isRecording) {
-    tray.setImage(buildRecordingIcon());
-  } else {
-    tray.setImage(buildTrayIcon());
-  }
-}
-
-function startTrayAnimation() {
-  if (trayTimer) return;
-  trayTimer = setInterval(() => {
-    if (trayFrames.length === 0) return;
-    trayFrameIndex = (trayFrameIndex + 1) % trayFrames.length;
-    updateTrayIcon();
-  }, 150);
-}
-
-function stopTrayAnimation() {
-  if (!trayTimer) return;
-  clearInterval(trayTimer);
-  trayTimer = null;
-  trayFrameIndex = 0;
+// ── Recording state ───────────────────────────────────────────────────────────
+function setRecording(nextState: boolean | undefined): void {
+  const { isRecording, win, configWin } = getMainState();
+  const newState = nextState === undefined ? !isRecording : !!nextState;
+  if (isRecording === newState) return;
+  setMainState({ isRecording: newState });
+  console.log('[record] state =>', newState ? 'recording' : 'stopped');
   updateTrayIcon();
+  updateTrayMenu();
+  if (win && !win.isDestroyed()) win.webContents.send('toggle-recording', { isRecording: newState });
+  if (configWin && !configWin.isDestroyed()) configWin.webContents.send('toggle-recording', { isRecording: newState });
 }
 
-function setTrayBusy(flag) {
-  if (trayBusy === !!flag) return;
-  trayBusy = !!flag;
-  if (tray) {
-    tray.setToolTip(trayBusy ? 'Tray Transcriber – busy…' : 'Tray Transcriber');
-  }
-  if (trayBusy) {
-    startTrayAnimation();
-  } else {
-    stopTrayAnimation();
-  }
-}
-
-function createWindow() {
-  win = new BrowserWindow({
-    width: 360,
-    height: 200,
-    show: false,
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(APP_ROOT, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
-  });
-
-  win.loadFile(path.join(APP_ROOT, 'index.html'));
-  win.setMenuBarVisibility(false);
-}
-
-function createConfigWindow() {
-  if (configWin) {
-    configWin.show();
-    configWin.focus();
-    return;
-  }
-  configWin = new BrowserWindow({
-    width: 520,
-    height: 680,
-    resizable: true,
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(APP_ROOT, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
-  });
-  configWin.on('closed', () => {
-    configWin = null;
-  });
-  configWin.loadFile(path.join(APP_ROOT, 'config.html'));
-  configWin.setMenuBarVisibility(false);
-}
-
-function updateTrayMenu() {
-  const statusLabel = isRecording ? 'Stop Recording' : 'Start Recording';
-  const contextMenu = Menu.buildFromTemplate([
-    { label: statusLabel, click: () => toggleRecording() },
-    {
-      label: 'Hold-to-Talk Mode',
-      type: 'checkbox',
-      checked: !!config.holdToTalk,
-      click: () => toggleHoldToTalk()
-    },
+function updateTrayMenu(): void {
+  const { isRecording, tray } = getMainState();
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: isRecording ? 'Stop Recording' : 'Start Recording', click: () => setRecording(undefined) },
+    { label: 'Hold-to-Talk Mode', type: 'checkbox', checked: !!config?.holdToTalk, click: () => toggleHoldToTalk() },
     { label: 'Learn Hold-to-Talk Hotkey', click: () => learnHoldHotkey() },
     { type: 'separator' },
     { label: 'Settings', click: () => createConfigWindow() },
@@ -443,1158 +75,14 @@ function updateTrayMenu() {
     { label: 'Open Config Folder', click: () => shell.openPath(app.getPath('userData')) },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
-  ]);
-  tray.setContextMenu(contextMenu);
+  ]));
 }
 
-function registerHotkey() {
-  globalShortcut.unregisterAll();
+// ── Transcription pipeline ────────────────────────────────────────────────────
+let transcribeQueue: any[] = [];
+let transcribeRunning = false;
 
-  // Register assistant shortcuts
-  if (Array.isArray(config.assistantShortcuts)) {
-    for (const item of config.assistantShortcuts) {
-      if (item && item.shortcut && item.prompt) {
-        const ok = globalShortcut.register(item.shortcut, () => {
-          console.log('[hotkey] assistant shortcut fired:', item.shortcut);
-          handleAssistantShortcut(item.prompt);
-        });
-        if (!ok) {
-          logger?.error('Failed to register assistant shortcut:', item.shortcut);
-        }
-      }
-    }
-  }
-
-  if (!config.hotkey) return;
-  if (config.holdToTalk) {
-    setupHoldToTalk();
-    return;
-  }
-  if (config.pressToTalk && config.preferKeyHook && setupPressToTalkWithHook()) {
-    return;
-  }
-  if (config.preferKeyHook && setupToggleWithHook()) {
-    return;
-  }
-  const ok = globalShortcut.register(config.hotkey, () => {
-    toggleRecording();
-  });
-  if (!ok) {
-    logger?.error('Failed to register hotkey:', config.hotkey);
-  }
-}
-
-function setRecording(nextState) {
-  if (!win) return;
-  if (isRecording === nextState) return;
-  isRecording = nextState;
-  console.log('[record] state =>', isRecording ? 'recording' : 'stopped');
-  updateTrayIcon();
-  updateTrayMenu();
-  win.webContents.send('toggle-recording', { isRecording });
-}
-
-function toggleRecording() {
-  if (!win) return;
-  const now = Date.now();
-  if (now - lastHotkeyAt < 400) return;
-  if (hotkeyGuard) return;
-  hotkeyGuard = true;
-  setTimeout(() => {
-    hotkeyGuard = false;
-  }, 700);
-  lastHotkeyAt = now;
-  console.log('[hotkey] toggle fired');
-  setRecording(!isRecording);
-}
-
-function tryLoadHook() {
-  if (hook) return hook;
-  if (!hasAccessibilityPermission()) {
-    console.warn('[hotkey] accessibility disabled; skipping uiohook');
-    showAccessibilityWarning();
-    return null;
-  }
-  try {
-    const mod = require('uiohook-napi');
-    if (mod && mod.uIOhook && typeof mod.uIOhook.on === 'function') {
-      hook = mod.uIOhook;
-      hookKeyMap = mod.UiohookKey || null;
-      modifierKeycodes = buildModifierKeycodes({
-        ctrlKey: true,
-        shiftKey: true,
-        altKey: true,
-        metaKey: true
-      });
-      return hook;
-    }
-    if (mod && typeof mod.on === 'function') {
-      hook = mod;
-      hookKeyMap = mod.UiohookKey || null;
-      modifierKeycodes = buildModifierKeycodes({
-        ctrlKey: true,
-        shiftKey: true,
-        altKey: true,
-        metaKey: true
-      });
-      return hook;
-    }
-    console.warn('[hotkey] uiohook-napi loaded but has no usable hook');
-    hook = null;
-    hookKeyMap = null;
-    modifierKeycodes = new Set();
-    return null;
-  } catch (err) {
-    try {
-      hook = require('iohook');
-      if (typeof hook.on !== 'function') {
-        console.warn('[hotkey] iohook loaded but has no .on');
-        hook = null;
-        hookKeyMap = null;
-        modifierKeycodes = new Set();
-        return null;
-      }
-      hookKeyMap = hook.UiohookKey || null;
-      modifierKeycodes = buildModifierKeycodes({
-        ctrlKey: true,
-        shiftKey: true,
-        altKey: true,
-        metaKey: true
-      });
-      return hook;
-    } catch (err2) {
-      console.warn('[hotkey] failed to load iohook/uiohook-napi');
-      hookKeyMap = null;
-      modifierKeycodes = new Set();
-      return null;
-    }
-  }
-}
-
-function setupHoldToTalk() {
-  const h = tryLoadHook();
-  if (!h) {
-    console.warn('[hotkey] hold-to-talk unavailable, falling back to toggle');
-    config.holdToTalk = false;
-    saveConfig(config);
-    registerHotkey();
-    updateTrayMenu();
-    return;
-  }
-  clearHookListeners(h);
-  holdHotkeySpec = buildHoldHotkeySpec();
-  if (!holdHotkeySpec) {
-    console.warn('[hotkey] hold-to-talk missing hotkey, falling back to toggle');
-    config.holdToTalk = false;
-    saveConfig(config);
-    registerHotkey();
-    updateTrayMenu();
-    return;
-  }
-
-  const onKeyDown = (event) => {
-    if (learningHotkey) return;
-    if (!matchesHoldSpec(event, holdHotkeySpec)) return;
-    if (holdKeyActive) return;
-    holdKeyActive = true;
-    setRecording(true);
-  };
-  const onKeyUp = (event) => {
-    if (learningHotkey) return;
-    if (shouldReleaseHold(event, holdHotkeySpec)) {
-      holdKeyActive = false;
-      setRecording(false);
-    }
-  };
-  hookListeners = { keydown: onKeyDown, keyup: onKeyUp };
-  h.on('keydown', onKeyDown);
-  h.on('keyup', onKeyUp);
-  safeStartHook(h);
-}
-
-function setupToggleWithHook() {
-  const h = tryLoadHook();
-  if (!h) return false;
-  clearHookListeners(h);
-  const onKeyDown = (event) => {
-    if (learningHotkey) return;
-    if (!matchesToggleHotkey(event)) return;
-    if (toggleKeyActive) return;
-    toggleKeyActive = true;
-    toggleRecording();
-  };
-  const onKeyUp = (event) => {
-    if (learningHotkey) return;
-    if (!matchesToggleHotkey(event)) return;
-    toggleKeyActive = false;
-  };
-  hookListeners = { keydown: onKeyDown, keyup: onKeyUp };
-  h.on('keydown', onKeyDown);
-  h.on('keyup', onKeyUp);
-  safeStartHook(h);
-  return true;
-}
-
-function setupPressToTalkWithHook() {
-  const h = tryLoadHook();
-  if (!h) return false;
-  clearHookListeners(h);
-  const onKeyDown = (event) => {
-    if (learningHotkey) return;
-    if (!matchesToggleHotkey(event)) return;
-    if (toggleKeyActive) return;
-    toggleKeyActive = true;
-    console.log('[hotkey] press-to-talk down', summarizeEvent(event));
-    setRecording(true);
-  };
-  const onKeyUp = (event) => {
-    if (learningHotkey) return;
-    if (!matchesToggleHotkey(event)) return;
-    toggleKeyActive = false;
-    console.log('[hotkey] press-to-talk up', summarizeEvent(event));
-    setRecording(false);
-  };
-  hookListeners = { keydown: onKeyDown, keyup: onKeyUp };
-  h.on('keydown', onKeyDown);
-  h.on('keyup', onKeyUp);
-  safeStartHook(h);
-  return true;
-}
-
-function buildHoldHotkeySpec() {
-  if (config.holdHotkey && typeof config.holdHotkey.keycode === 'number') {
-    if (isModifierKeycode(config.holdHotkey.keycode)) {
-      console.warn('[hotkey] holdHotkey is modifier-only, falling back to hotkey string');
-    } else {
-    return {
-      keycode: config.holdHotkey.keycode,
-      ctrlKey: !!config.holdHotkey.ctrlKey,
-      shiftKey: !!config.holdHotkey.shiftKey,
-      altKey: !!config.holdHotkey.altKey,
-      metaKey: !!config.holdHotkey.metaKey,
-      modifierKeycodes: buildModifierKeycodes({
-        ctrlKey: !!config.holdHotkey.ctrlKey,
-        shiftKey: !!config.holdHotkey.shiftKey,
-        altKey: !!config.holdHotkey.altKey,
-        metaKey: !!config.holdHotkey.metaKey
-      })
-    };
-    }
-  }
-  if (!config.hotkey) return null;
-  const parsed = parseHotkeyString(config.hotkey);
-  if (!parsed) return null;
-  return parsed;
-}
-
-function matchesHoldSpec(event, spec) {
-  return (
-    event.keycode === spec.keycode &&
-    (!spec.ctrlKey || !!event.ctrlKey) &&
-    (!spec.shiftKey || !!event.shiftKey) &&
-    (!spec.altKey || !!event.altKey) &&
-    (!spec.metaKey || !!event.metaKey)
-  );
-}
-
-function shouldReleaseHold(event, spec) {
-  if (event.keycode === spec.keycode) return true;
-  if (config.holdStopOnModifierRelease && spec.modifierKeycodes && spec.modifierKeycodes.has(event.keycode)) {
-    return true;
-  }
-  return false;
-}
-
-function matchesToggleHotkey(event) {
-  if (!config.hotkey) return false;
-  const spec = parseHotkeyString(config.hotkey);
-  if (!spec) return false;
-  const keycodeMatch = spec.keycode;
-  return (
-    event.keycode === keycodeMatch &&
-    !!event.ctrlKey === !!spec.ctrlKey &&
-    !!event.shiftKey === !!spec.shiftKey &&
-    !!event.altKey === !!spec.altKey &&
-    !!event.metaKey === !!spec.metaKey
-  );
-}
-
-function parseHotkeyString(hotkey) {
-  if (!hotkey) return null;
-  const parts = hotkey.split('+').map((p) => p.trim().toLowerCase());
-  const wantsCtrl = parts.includes('commandorcontrol') || parts.includes('control') || parts.includes('ctrl');
-  const wantsShift = parts.includes('shift');
-  const wantsAlt = parts.includes('alt') || parts.includes('option');
-  const wantsMeta = parts.includes('command') || parts.includes('meta');
-  const keyPart = parts[parts.length - 1];
-  const keycodeMatch = keycodeFromKeyPart(keyPart);
-  if (!keycodeMatch) return null;
-  return {
-    keycode: keycodeMatch,
-    ctrlKey: wantsCtrl,
-    shiftKey: wantsShift,
-    altKey: wantsAlt,
-    metaKey: wantsMeta,
-    modifierKeycodes: buildModifierKeycodes({
-      ctrlKey: wantsCtrl,
-      shiftKey: wantsShift,
-      altKey: wantsAlt,
-      metaKey: wantsMeta
-    })
-  };
-}
-
-function buildModifierKeycodes(mods) {
-  const codes = new Set();
-  if (!hookKeyMap) return codes;
-  if (mods.ctrlKey) {
-    if (hookKeyMap.Ctrl) codes.add(hookKeyMap.Ctrl);
-    if (hookKeyMap.CtrlRight) codes.add(hookKeyMap.CtrlRight);
-  }
-  if (mods.shiftKey) {
-    if (hookKeyMap.Shift) codes.add(hookKeyMap.Shift);
-    if (hookKeyMap.ShiftRight) codes.add(hookKeyMap.ShiftRight);
-  }
-  if (mods.altKey) {
-    if (hookKeyMap.Alt) codes.add(hookKeyMap.Alt);
-    if (hookKeyMap.AltRight) codes.add(hookKeyMap.AltRight);
-  }
-  if (mods.metaKey) {
-    if (hookKeyMap.Meta) codes.add(hookKeyMap.Meta);
-    if (hookKeyMap.MetaRight) codes.add(hookKeyMap.MetaRight);
-  }
-  return codes;
-}
-
-function keycodeFromKeyPart(keyPart) {
-  if (hookKeyMap) {
-    const mapKey = Object.keys(hookKeyMap).find((k) => k.toLowerCase() === keyPart);
-    if (mapKey && hookKeyMap[mapKey]) return hookKeyMap[mapKey];
-  }
-  const table = {
-    space: 57,
-    return: 28,
-    enter: 28,
-    tab: 15,
-    escape: 1,
-    esc: 1
-  };
-  if (table[keyPart]) return table[keyPart];
-  // Letters A-Z (uiohook keycodes; fallback to ASCII if unknown)
-  if (/^[a-z]$/.test(keyPart)) {
-    return keyPart.toUpperCase().charCodeAt(0);
-  }
-  return null;
-}
-
-function summarizeEvent(event) {
-  return {
-    keycode: event.keycode,
-    ctrlKey: !!event.ctrlKey,
-    shiftKey: !!event.shiftKey,
-    altKey: !!event.altKey,
-    metaKey: !!event.metaKey
-  };
-}
-
-function isModifierKeycode(keycode) {
-  return modifierKeycodes && modifierKeycodes.has(keycode);
-}
-
-function clearHookListeners(h) {
-  if (!h) return;
-  if (hookListeners.keydown) {
-    if (typeof h.off === 'function') h.off('keydown', hookListeners.keydown);
-    else if (typeof h.removeListener === 'function') h.removeListener('keydown', hookListeners.keydown);
-  }
-  if (hookListeners.keyup) {
-    if (typeof h.off === 'function') h.off('keyup', hookListeners.keyup);
-    else if (typeof h.removeListener === 'function') h.removeListener('keyup', hookListeners.keyup);
-  }
-  hookListeners = { keydown: null, keyup: null };
-}
-
-function safeStartHook(h) {
-  try {
-    if (!hasAccessibilityPermission()) {
-      console.warn('[hotkey] not starting hook; accessibility disabled');
-      showAccessibilityWarning();
-      return;
-    }
-    if (typeof h.start === 'function') {
-      const result = h.start();
-      if (result && typeof result.catch === 'function') {
-        result.catch((err) => console.warn('[hotkey] hook start failed:', err));
-      }
-    }
-  } catch (err) {
-    console.warn('[hotkey] hook start error:', err);
-  }
-}
-
-function learnHoldHotkey() {
-  const h = tryLoadHook();
-  if (!h) return;
-  learningHotkey = true;
-  console.log('[hotkey] learning hold-to-talk hotkey: press desired combo now');
-  const onKeyDown = (event) => {
-    if (isModifierKeycode(event.keycode)) {
-      console.log('[hotkey] ignoring modifier-only key, press a non-modifier');
-      return;
-    }
-    const next = {
-      keycode: event.keycode,
-      ctrlKey: !!event.ctrlKey,
-      shiftKey: !!event.shiftKey,
-      altKey: !!event.altKey,
-      metaKey: !!event.metaKey
-    };
-    config.holdHotkey = next;
-    config.holdToTalk = true;
-    saveConfig(config);
-    learningHotkey = false;
-    console.log('[hotkey] learned hold-to-talk hotkey:', next);
-    if (typeof h.off === 'function') h.off('keydown', onKeyDown);
-    else if (typeof h.removeListener === 'function') h.removeListener('keydown', onKeyDown);
-    setupHoldToTalk();
-    updateTrayMenu();
-  };
-  clearHookListeners(h);
-  hookListeners = { keydown: onKeyDown, keyup: null };
-  h.on('keydown', onKeyDown);
-  safeStartHook(h);
-}
-
-function toggleHoldToTalk() {
-  config.holdToTalk = !config.holdToTalk;
-  saveConfig(config);
-  registerHotkey();
-  updateTrayMenu();
-}
-
-async function runWhisperX(audioPath) {
-  if (config.asrEngine && config.asrEngine !== 'whisperx') {
-    if (!config.useWorker) {
-      throw new Error(`${config.asrEngine} engine requires worker (set useWorker=true)`);
-    }
-    return await transcribeViaWorker(audioPath);
-  }
-  if (config.useWorker) {
-    try {
-      const text = await transcribeViaWorker(audioPath);
-      if (typeof text === 'string') return text;
-    } catch (err) {
-      console.warn('[worker] failed, falling back to CLI:', err && err.message ? err.message : err);
-    }
-  }
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tray-transcriber-'));
-  const outputDir = path.join(tmpDir, 'out');
-  fs.mkdirSync(outputDir, { recursive: true });
-
-  const prompt = buildInitialPrompt();
-
-  const args = [
-    ...config.whisperxArgs,
-    audioPath,
-    '--output_dir',
-    outputDir,
-    '--output_format',
-    'txt',
-    '--language',
-    config.language,
-    '--model',
-    config.model
-  ];
-  if (config.device === 'cpu') {
-    args.push('--device', 'cpu');
-  } else if (config.device === 'gpu') {
-    args.push('--device', 'cuda');
-  }
-
-  if (prompt) {
-    args.push('--initial_prompt', prompt);
-  }
-  if (config.computeType) {
-    args.push('--compute_type', config.computeType);
-  }
-  if (config.batchSize) {
-    args.push('--batch_size', String(config.batchSize));
-  }
-  if (config.noAlign) {
-    args.push('--no_align');
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    const env = buildWorkerEnv();
-    const proc = spawn(resolvePythonCommand(), args, { stdio: 'inherit', env });
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`whisperx exited with code ${code}`));
-    });
-  });
-
-  const txtFiles = fs.readdirSync(outputDir).filter((f) => f.endsWith('.txt'));
-  if (!txtFiles.length) return '';
-  const txtPath = path.join(outputDir, txtFiles[0]);
-  const text = fs.readFileSync(txtPath, 'utf8').trim();
-  return text;
-}
-
-function resetWorkerStdioState() {
-  workerPending = new Map();
-  workerBuffer = '';
-  workerReadyResolve = null;
-}
-
-function setupWorkerStdio(proc) {
-  resetWorkerStdioState();
-  workerReady = false;
-  workerPromise = null;
-  const readyPromise = new Promise((resolve) => {
-    workerReadyResolve = resolve;
-  });
-  proc.stdout.on('data', (chunk) => {
-    workerBuffer += chunk.toString('utf8');
-    let idx;
-    while ((idx = workerBuffer.indexOf('\n')) >= 0) {
-      const line = workerBuffer.slice(0, idx).trim();
-      workerBuffer = workerBuffer.slice(idx + 1);
-      if (!line) continue;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch (err) {
-        logger?.error('[worker] invalid json from stdio', line);
-        continue;
-      }
-      handleWorkerMessage(msg);
-    }
-  });
-  return readyPromise;
-}
-
-function handleWorkerMessage(msg) {
-  if (!msg) return;
-  if (msg.type === 'ready') {
-    workerReady = true;
-    if (workerReadyResolve) workerReadyResolve(true);
-    return;
-  }
-  if (typeof msg.id !== 'undefined') {
-    const pending = workerPending.get(msg.id);
-    if (!pending) return;
-    workerPending.delete(msg.id);
-    if (msg.ok) {
-      pending.resolve(msg.result || {});
-    } else {
-      pending.reject(new Error(msg.error || 'worker error'));
-    }
-  }
-}
-
-function sendWorkerMessage(type, payload, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    if (!workerProc || !workerProc.stdin || !workerProc.stdin.writable) {
-      reject(new Error('worker stdin not writable'));
-      return;
-    }
-    const id = ++workerMsgId;
-    workerPending.set(id, { resolve, reject });
-    const message = JSON.stringify({ id, type, payload });
-    workerProc.stdin.write(message + '\n');
-    if (timeoutMs) {
-      setTimeout(() => {
-        if (workerPending.has(id)) {
-          workerPending.delete(id);
-          reject(new Error(`worker request timeout after ${timeoutMs}ms`));
-        }
-      }, timeoutMs);
-    }
-  });
-}
-
-function startWorker() {
-  if (workerProc) return;
-  const scriptPath = resolveWorkerScriptPath();
-  if (!scriptPath) {
-    console.error('[worker] worker.py not found');
-    return;
-  }
-  const env = buildWorkerEnv();
-  const pythonCmd = resolvePythonCommand();
-  const transport = getWorkerTransport();
-  try {
-    workerProc = spawn(
-      pythonCmd,
-      ['-u', scriptPath, '--host', config.workerHost, '--port', String(config.workerPort), '--mode', transport],
-      {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env
-      }
-    );
-  } catch (err) {
-    console.error('[worker] spawn failed', err, { pythonCmd, scriptPath });
-    workerProc = null;
-    return;
-  }
-  if (transport === 'stdio') {
-    workerStdioReadyPromise = setupWorkerStdio(workerProc);
-  } else {
-    workerProc.stdout.on('data', (chunk) => {
-      logger?.info(`[worker] ${chunk.toString().trimEnd()}`);
-    });
-  }
-  workerProc.stderr.on('data', (chunk) => {
-    logger?.error(`[worker] ${chunk.toString().trimEnd()}`);
-  });
-  workerProc.on('exit', () => {
-    workerProc = null;
-    workerReady = false;
-    workerPromise = null;
-    workerStdioReadyPromise = null;
-  });
-}
-
-function ensureWorker() {
-  if (!config.useWorker) return Promise.resolve(false);
-  if (workerReady) return Promise.resolve(true);
-  if (workerPromise) return workerPromise;
-  const transport = getWorkerTransport();
-  workerPromise = new Promise((resolve) => {
-    startWorker();
-    if (!workerProc) {
-      resolve(false);
-      return;
-    }
-    if (transport === 'stdio') {
-      const timeoutMs = config.workerStartupTimeoutMs || 15000;
-      const timeout = setTimeout(() => {
-        workerReady = false;
-        resolve(false);
-      }, timeoutMs);
-      if (workerStdioReadyPromise) {
-        workerStdioReadyPromise.then(() => {
-          clearTimeout(timeout);
-          resolve(true);
-        });
-      }
-      return;
-    }
-    const start = Date.now();
-    const timer = setInterval(() => {
-      const elapsed = Date.now() - start;
-      if (elapsed > config.workerStartupTimeoutMs) {
-        clearInterval(timer);
-        workerReady = false;
-        resolve(false);
-        return;
-      }
-      const req = http.get({ host: config.workerHost, port: config.workerPort, path: '/health', timeout: 2000 }, (res) => {
-        res.resume();
-        if (res.statusCode === 200) {
-          clearInterval(timer);
-          workerReady = true;
-          resolve(true);
-        }
-      });
-      req.on('error', () => {});
-      req.on('timeout', () => {
-        req.destroy();
-      });
-    }, 300);
-  });
-  return workerPromise;
-}
-
-async function transcribeViaWorker(audioPath) {
-  const ok = await ensureWorker();
-  if (!ok) return null;
-  const audioBytes = fs.readFileSync(audioPath);
-  const prompt = buildInitialPrompt();
-  const payload = {
-    engine: config.asrEngine || 'whisperx',
-    audio_base64: audioBytes.toString('base64'),
-    extension: path.extname(audioPath),
-    model: config.model,
-    language: config.language,
-    compute_type: config.computeType,
-    batch_size: config.batchSize,
-    no_align: config.noAlign,
-    initial_prompt: prompt || undefined,
-    device: config.device || 'default'
-  };
-  const transport = getWorkerTransport();
-  if (transport === 'stdio') {
-    const timeoutMs = config.workerRequestTimeoutMs || 30000;
-    const result = await sendWorkerMessage('transcribe', payload, timeoutMs) as { segments_len?: number; text?: string };
-    if (result && typeof result.segments_len === 'number') {
-      logger?.debug('[worker] segments_len=', String(result.segments_len));
-    }
-    return result && result.text ? result.text : '';
-  }
-  const body = JSON.stringify(payload);
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const pollMs = config.workerStatusPollMs || 0;
-    let statusTimer = null;
-    if (pollMs > 0) {
-      statusTimer = setInterval(() => {
-        fetchWorkerStatus('transcribe_wait');
-      }, pollMs);
-    }
-    const req = http.request(
-      {
-        host: config.workerHost,
-        port: config.workerPort,
-        path: '/transcribe',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
-        },
-        timeout: config.workerRequestTimeoutMs || 30000
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk.toString('utf8');
-        });
-        res.on('end', () => {
-          if (statusTimer) clearInterval(statusTimer);
-          if (res.statusCode !== 200) {
-            reject(new Error(`worker error ${res.statusCode}: ${data}`));
-            return;
-          }
-          try {
-            const parsed = JSON.parse(data);
-            if (typeof parsed.segments_len === 'number') {
-              console.log('[worker] segments_len=', parsed.segments_len);
-            }
-            console.log('[worker] transcribe ms=', Date.now() - start);
-            resolve(parsed.text || '');
-          } catch (err) {
-            reject(err);
-          }
-        });
-      }
-    );
-    req.on('timeout', () => {
-      if (statusTimer) clearInterval(statusTimer);
-      const timeoutMs = config.workerRequestTimeoutMs || 30000;
-      req.destroy(new Error(`worker request timeout after ${timeoutMs}ms`));
-    });
-    req.on('error', (err) => {
-      if (statusTimer) clearInterval(statusTimer);
-      reject(err);
-    });
-    req.write(body);
-    req.end();
-  });
-}
-
-function tryPaste(text) {
-  clipboard.writeText(text || '');
-  if (config.pasteMode !== 'paste') return false;
-
-  const systemResult = tryPasteViaSystem();
-  if (systemResult) return true;
-
-  // Avoid robotjs on macOS when accessibility is disabled (can abort the process).
-  if (process.platform === 'darwin') {
-    return false;
-  }
-
-  try {
-    console.log('[paste] trying robotjs');
-    const robot = require('robotjs');
-    const modifier = 'control';
-    robot.keyTap('v', modifier);
-    console.log('[paste] robotjs succeeded');
-    return true;
-  } catch (err) {
-    console.warn('[paste] robotjs failed:', err && err.message ? err.message : err);
-    return false;
-  }
-}
-
-function tryPasteViaSystem() {
-  const hasCmd = (cmd) => {
-    const result = spawnSync('which', [cmd]);
-    return result.status === 0;
-  };
-  const isWayland =
-    process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
-  if (process.platform === 'darwin') {
-    console.log('[paste] trying osascript');
-    const result = spawnSync('osascript', [
-      '-e',
-      'tell application "System Events" to keystroke "v" using command down'
-    ]);
-    if (result.status !== 0) {
-      const stderr = result.stderr ? result.stderr.toString() : '';
-      console.warn('[paste] osascript failed:', stderr || result.status);
-      if (stderr.includes('Not authorized') || stderr.includes('System Events') || stderr.includes('not authorized')) {
-        console.warn('[paste] accessibility not granted; paste disabled on macOS');
-      }
-    } else {
-      console.log('[paste] osascript succeeded');
-    }
-    return result.status === 0;
-  }
-  if (process.platform === 'win32') {
-    console.log('[paste] trying powershell SendKeys');
-    const script =
-      '$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys("^v")';
-    const result = spawnSync('powershell', ['-NoProfile', '-Command', script]);
-    if (result.status !== 0) {
-      console.warn('[paste] powershell failed:', result.stderr ? result.stderr.toString() : result.status);
-    } else {
-      console.log('[paste] powershell succeeded');
-    }
-    return result.status === 0;
-  }
-  if (hasCmd('wtype')) {
-    console.log('[paste] trying wtype');
-    const result = spawnSync('wtype', ['-M', 'ctrl', 'v', '-m', 'ctrl']);
-    if (result.status !== 0) {
-      console.warn('[paste] wtype failed:', result.stderr ? result.stderr.toString() : result.status);
-    } else {
-      console.log('[paste] wtype succeeded');
-    }
-    if (result.status === 0) return true;
-  }
-  if (isWayland && !hasCmd('wtype')) {
-    console.warn('[paste] Wayland session detected but wtype not found');
-  }
-  if (!hasCmd('xdotool')) {
-    console.warn('[paste] xdotool not found in PATH');
-    return false;
-  }
-  console.log('[paste] trying xdotool');
-  const result = spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+v']);
-  if (result.status !== 0) {
-    console.warn('[paste] xdotool failed:', result.stderr ? result.stderr.toString() : result.status);
-  } else {
-    console.log('[paste] xdotool succeeded');
-  }
-  return result.status === 0;
-}
-
-// try to copy selection via system utilities (mirrors tryPasteViaSystem)
-function tryCopyViaSystem() {
-  const hasCmd = (cmd) => {
-    const result = spawnSync('which', [cmd]);
-    return result.status === 0;
-  };
-  const isWayland =
-    process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
-
-  if (process.platform === 'darwin') {
-    console.log('[copy] trying osascript');
-    const result = spawnSync('osascript', [
-      '-e',
-      'tell application "System Events" to keystroke "c" using command down'
-    ]);
-    if (result.status !== 0) {
-      const stderr = result.stderr ? result.stderr.toString() : '';
-      console.warn('[copy] osascript failed:', stderr || result.status);
-      if (stderr.includes('Not authorized') || stderr.includes('System Events') || stderr.includes('not authorized')) {
-        console.warn('[copy] accessibility not granted; copy disabled on macOS');
-      }
-    } else {
-      console.log('[copy] osascript succeeded');
-    }
-    return result.status === 0;
-  }
-  if (process.platform === 'win32') {
-    console.log('[copy] trying powershell SendKeys');
-    const script =
-      '$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys("^c")';
-    const result = spawnSync('powershell', ['-NoProfile', '-Command', script]);
-    if (result.status !== 0) {
-      console.warn('[copy] powershell failed:', result.stderr ? result.stderr.toString() : result.status);
-    } else {
-      console.log('[copy] powershell succeeded');
-    }
-    return result.status === 0;
-  }
-  if (hasCmd('wtype')) {
-    console.log('[copy] trying wtype');
-    const result = spawnSync('wtype', ['-M', 'ctrl', 'c', '-m', 'ctrl']);
-    if (result.status !== 0) {
-      console.warn('[copy] wtype failed:', result.stderr ? result.stderr.toString() : result.status);
-    } else {
-      console.log('[copy] wtype succeeded');
-    }
-    if (result.status === 0) return true;
-  }
-  if (isWayland && !hasCmd('wtype')) {
-    console.warn('[copy] Wayland session detected but wtype not found');
-  }
-  if (!hasCmd('xdotool')) {
-    console.warn('[copy] xdotool not found in PATH');
-    return false;
-  }
-  console.log('[copy] trying xdotool');
-  const result = spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+c']);
-  if (result.status !== 0) {
-    console.warn('[copy] xdotool failed:', result.stderr ? result.stderr.toString() : result.status);
-  } else {
-    console.log('[copy] xdotool succeeded');
-  }
-  return result.status === 0;
-}
-
-// retrieve any selected text in the active application
-async function getSelectedText() {
-  // first try primary selection (Linux)
-  try {
-    const sel = clipboard.readText('selection');
-    if (sel && sel.trim()) return sel;
-  } catch (_) {}
-
-  // fall back to copying via system keystroke and reading clipboard
-  if (tryCopyViaSystem()) {
-    // small delay to allow clipboard populate
-    await new Promise((r) => setTimeout(r, 50));
-    const txt = clipboard.readText();
-    return txt || '';
-  }
-  return '';
-}
-
-// call configured LLM endpoint with simple chat protocol
-async function callLLM(prompt, onChunk) {
-  if (!prompt) return '';
-  const endpoint = config.llmEndpoint;
-  const model = config.llmModel;
-  const key = config.llmApiKey || process.env.OPENAI_API_KEY;
-  if (!key) throw new Error('no LLM API key configured');
-
-  const messages = [];
-  if (config.llmSystemPrompt) {
-    messages.push({ role: 'system', content: config.llmSystemPrompt });
-  }
-  // Add history
-  for (const msg of llmHistory) {
-    messages.push(msg);
-  }
-  messages.push({ role: 'user', content: prompt });
-
-  const body = JSON.stringify({
-    model,
-    messages,
-    stream: !!onChunk
-  });
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${key}`
-  };
-  const resp = await fetch(endpoint, { method: 'POST', headers, body });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`LLM request failed ${resp.status}: ${text}`);
-  }
-
-  if (!onChunk) {
-    const data = await resp.json();
-    // OpenAI-style response
-    const content =
-      data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
-    return content;
-  }
-
-  // Streaming response
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let fullContent = '';
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed === 'data: [DONE]') continue;
-      if (trimmed.startsWith('data: ')) {
-        try {
-          const data = JSON.parse(trimmed.slice(6));
-          const chunk = data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || '';
-          if (chunk) {
-            fullContent += chunk;
-            onChunk(chunk);
-          }
-        } catch (e) {
-          // ignore parse errors for incomplete chunks
-        }
-      }
-    }
-  }
-  return fullContent;
-}
-
-// determine if transcript should be handled by assistant
-function shouldHandleAsAssistant(text) {
-  if (!text || !config.assistantName) return false;
-  const trimmed = text.trim();
-  const name = config.assistantName.trim();
-  if (!name) return false;
-  const re = new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-  return re.test(trimmed);
-}
-
-async function handleAssistant(text) {
-  if (!shouldHandleAsAssistant(text)) return false;
-  const trimmed = text.trim();
-  const name = config.assistantName.trim();
-  const remainder = trimmed.replace(new RegExp('^' + name, 'i'), '').trim();
-  let prompt = remainder;
-  const selection = await getSelectedText();
-  if (selection) {
-    prompt = prompt ? `${prompt}\n\n${selection}` : selection;
-  }
-  console.log('[assistant] trigger=', name, 'prompt=', prompt);
-  setTrayBusy(true);
-  try {
-    let firstChunk = true;
-    let streamingFailed = false;
-    let typedLength = 0;
-    const response = await callLLM(prompt, (chunk) => {
-      if (config.pasteMode === 'paste' && !streamingFailed) {
-        if (firstChunk) {
-          if (selection) {
-            try {
-              const robot = require('robotjs');
-              robot.keyTap('backspace');
-            } catch (e) {
-              streamingFailed = true;
-            }
-          }
-          firstChunk = false;
-        }
-        if (!streamingFailed) {
-          try {
-            const robot = require('robotjs');
-            robot.typeString(chunk);
-            typedLength += chunk.length;
-          } catch (e) {
-            streamingFailed = true;
-          }
-        }
-      }
-    });
-    console.log('[assistant] response=', response);
-    if (response) {
-      llmHistory.push({ role: 'user', content: prompt });
-      llmHistory.push({ role: 'assistant', content: response });
-      // Keep only last 10 messages (5 turns)
-      if (llmHistory.length > 10) {
-        llmHistory = llmHistory.slice(llmHistory.length - 10);
-      }
-
-      clipboard.writeText(response);
-      if (config.pasteMode === 'paste' && (firstChunk || streamingFailed)) {
-        // If streaming failed or wasn't used, paste the remaining part
-        const remaining = response.substring(typedLength);
-        if (remaining) {
-          clipboard.writeText(remaining);
-          tryPaste(remaining);
-          // Restore full response to clipboard after pasting
-          setTimeout(() => clipboard.writeText(response), 500);
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[assistant] error', err);
-    return false;
-  } finally {
-    setTrayBusy(false);
-  }
-  return true;
-}
-
-async function handleAssistantShortcut(basePrompt) {
-  let prompt = basePrompt;
-  const selection = await getSelectedText();
-  if (selection) {
-    prompt = prompt ? `${prompt}\n\n${selection}` : selection;
-  }
-  console.log('[assistant] shortcut prompt=', prompt);
-  setTrayBusy(true);
-  try {
-    let firstChunk = true;
-    let streamingFailed = false;
-    let typedLength = 0;
-    const response = await callLLM(prompt, (chunk) => {
-      if (config.pasteMode === 'paste' && !streamingFailed) {
-        if (firstChunk) {
-          if (selection) {
-            try {
-              const robot = require('robotjs');
-              robot.keyTap('backspace');
-            } catch (e) {
-              streamingFailed = true;
-            }
-          }
-          firstChunk = false;
-        }
-        if (!streamingFailed) {
-          try {
-            const robot = require('robotjs');
-            robot.typeString(chunk);
-            typedLength += chunk.length;
-          } catch (e) {
-            streamingFailed = true;
-          }
-        }
-      }
-    });
-    console.log('[assistant] shortcut response=', response);
-    if (response) {
-      llmHistory.push({ role: 'user', content: prompt });
-      llmHistory.push({ role: 'assistant', content: response });
-      if (llmHistory.length > 10) {
-        llmHistory = llmHistory.slice(llmHistory.length - 10);
-      }
-      clipboard.writeText(response);
-      if (config.pasteMode === 'paste' && (firstChunk || streamingFailed)) {
-        const remaining = response.substring(typedLength);
-        if (remaining) {
-          clipboard.writeText(remaining);
-          tryPaste(remaining);
-          setTimeout(() => clipboard.writeText(response), 500);
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[assistant] shortcut error', err);
-  } finally {
-    setTrayBusy(false);
-  }
-}
-
-ipcMain.on('recording-complete', async (_event, payload) => {
-  const size = payload && typeof payload.size === 'number' ? payload.size : (payload?.buffer?.length || 0);
-  if (!payload || !payload.buffer || size < config.minRecordingBytes) {
-    console.log('[record] ignoring empty/short recording', { size, min: config.minRecordingBytes });
-    return;
-  }
-  const buffer = Buffer.from(payload.buffer);
-  const ext = payload.extension || 'webm';
-  const durationMs = payload.durationMs || 0;
-  console.log('[record] received buffer', { size, ext, durationMs });
-  const audioPath = path.join(os.tmpdir(), `tray-transcriber-${Date.now()}.${ext}`);
-  fs.writeFileSync(audioPath, buffer);
-  transcribeQueue.push({ audioPath, size, durationMs });
-  console.log('[queue] enqueued', { pending: transcribeQueue.length });
-  processTranscribeQueue();
-});
-
-async function processTranscribeQueue() {
+async function processTranscribeQueue(): Promise<void> {
   if (transcribeRunning) return;
   const next = transcribeQueue.shift();
   if (!next) return;
@@ -1602,297 +90,127 @@ async function processTranscribeQueue() {
   setTrayBusy(true);
   try {
     console.log('[transcribe] start', { audioPath: next.audioPath, pending: transcribeQueue.length });
-    const rawText = await runWhisperX(next.audioPath);
-    console.log('[transcribe] done');
-    const text = normalizeTranscript(rawText);
-    console.log('[transcript] len=', text.length, 'preview=', text.slice(0, 120));
-    if (text) {
-      // check for assistant command first
+    const text = normalizeTranscript(await runWhisperX(next.audioPath));
+    console.log('[transcript] len=%d preview=%s', text.length, text.slice(0, 120));
+    if (next.uiSession) {
+      // Always reply to the UI so isTranscribing and the textarea can update.
+      const { win, configWin } = getMainState();
+      const sendToRenderers = (t: string) => {
+        if (win && !win.isDestroyed()) win.webContents.send('transcript-ready', { text: t });
+        if (configWin && !configWin.isDestroyed()) configWin.webContents.send('transcript-ready', { text: t });
+      };
+      sendToRenderers(text);
+    } else if (text) {
       const handled = await handleAssistant(text);
       if (!handled) {
-        const pasted = tryPaste(text);
-        console.log('[paste] result=', pasted ? 'pasted' : 'copied');
-        if (!pasted) {
-          clipboard.writeText(text);
-        }
+        if (!tryPaste(text)) clipboard.writeText(text);
       }
-    } else {
-      console.log('[transcript] empty, skipping paste');
     }
   } catch (err) {
     console.error('[transcribe] error', err);
+    // If this was a UI-initiated recording, notify the renderer so isTranscribing resets.
+    if (next.uiSession) {
+      const { win, configWin } = getMainState();
+      if (win && !win.isDestroyed()) win.webContents.send('transcript-ready', { text: '' });
+      if (configWin && !configWin.isDestroyed()) configWin.webContents.send('transcript-ready', { text: '' });
+    }
   } finally {
     setTrayBusy(false);
     fs.unlink(next.audioPath, () => {});
     transcribeRunning = false;
-    if (transcribeQueue.length) {
-      processTranscribeQueue();
-    }
+    if (transcribeQueue.length) processTranscribeQueue();
   }
 }
 
-ipcMain.on('debug-log', (_event, payload) => {
+// ── IPC handlers ──────────────────────────────────────────────────────────────
+ipcMain.on('recording-complete', async (event: any, payload: any) => {
+  const size = typeof payload?.size === 'number' ? payload.size : (payload?.buffer?.length || 0);
+  if (!payload?.buffer || size < (config?.minRecordingBytes || 200)) {
+    console.log('[record] ignoring short recording', { size, min: config?.minRecordingBytes });
+    return;
+  }
+  const buffer = Buffer.from(payload.buffer);
+  const audioPath = path.join(os.tmpdir(), `tray-transcriber-${Date.now()}.${payload.extension || 'webm'}`);
+  fs.writeFileSync(audioPath, buffer);
+  transcribeQueue.push({ audioPath, size, durationMs: payload.durationMs || 0, uiSession: !!payload.uiSession, senderId: event?.sender?.id });
+  console.log('[queue] enqueued', { pending: transcribeQueue.length });
+  processTranscribeQueue();
+});
+
+ipcMain.on('debug-log', (_event: any, payload: any) => {
   if (!payload) return;
-  if (payload.data) {
-    console.log('[renderer]', payload.message, payload.data);
-  } else {
-    console.log('[renderer]', payload.message);
+  console.log('[renderer]', payload.message, ...(payload.data ? [payload.data] : []));
+});
+
+ipcMain.on('ui-set-recording-state', (_event: any, payload: any) => {
+  if (typeof payload?.isRecording !== 'boolean') return;
+  setRecording(!!payload.isRecording);
+});
+
+ipcMain.on('ui-update-tray-icon', () => updateTrayIcon());
+
+ipcMain.on('config-updated', (_event: any, newConfig: any) => {
+  Object.assign(config, newConfig);
+  saveConfig(config);
+  const log = createLogger();
+  installConsoleLogger(log);
+  registerHotkey();
+  updateTrayMenu();
+  restartWorker();
+  reloadAllWindows();
+
+  // if the cursorBusy preference is now enabled and we happen to already be
+  // in a busy state, make sure existing renderer windows know so they can set
+  // the busy cursor immediately.
+  // propagate busy cursor state based on the *new* config value; this
+  // will send `true` if both settings and current busy state are true, or
+  // `false` if the preference was just disabled while we were busy.
+  if (getMainState().trayBusy) {
+    const { win, configWin } = getMainState();
+    const flag = !!config.cursorBusy;
+    [win, configWin].forEach((w) => {
+      if (w && !w.isDestroyed()) w.webContents.send('cursor-busy', flag);
+    });
   }
 });
 
-function normalizeTranscript(text) {
-  if (!text) return '';
-  const normalized = String(text).replace(/\s+/g, ' ').trim();
-  return applyDictionaryCorrections(normalized);
-}
+ipcMain.handle('get-config', () => ({ ...config }));
 
-function buildInitialPrompt() {
-  const custom = (config.prompt || '').trim();
-  const dictItems = getDictionaryItems();
-  const dictText = dictItems.length
-    ? `Vocabulary: ${dictItems
-        .map((item) => {
-          if (config.includeDictionaryDescriptions && item.description) {
-            return `${item.term} (${item.description})`;
-          }
-          return item.term;
-        })
-        .join(', ')}`
-    : '';
-  if (!custom && !dictText) return '';
-  if (!config.includeDictionaryInPrompt || !dictText) return custom || dictText;
-  if (config.promptMode === 'prepend' && custom) {
-    return `${dictText}\n${custom}`;
-  }
-  if (custom) {
-    return `${custom}\n${dictText}`;
-  }
-  return dictText;
-}
-
-function getDictionaryItems() {
-  const raw = Array.isArray(config.dictionary) ? config.dictionary : [];
-  const items = [];
-  for (const entry of raw) {
-    if (!entry) continue;
-    if (typeof entry === 'string') {
-      const term = entry.trim();
-      if (term) items.push({ term, description: '' });
-      continue;
-    }
-    if (typeof entry === 'object') {
-      const term = String(entry.term || entry.word || '').trim();
-      const description = String(entry.description || '').trim();
-      if (term) items.push({ term, description });
-    }
-  }
-  return items;
-}
-
-function getDictionaryCorrections() {
-  const raw = Array.isArray(config.dictionaryCorrections) ? config.dictionaryCorrections : [];
-  const items = [];
-  for (const entry of raw) {
-    if (!entry) continue;
-    if (typeof entry === 'object') {
-      const from = String(entry.from || entry.source || '').trim();
-      const to = String(entry.to || entry.target || '').trim();
-      if (from && to) items.push({ from, to });
-    }
-  }
-  return items;
-}
-
-function applyDictionaryCorrections(text) {
-  const rules = getDictionaryCorrections();
-  if (!rules.length) return text;
-  let result = text;
-  for (const rule of rules) {
-    const escaped = rule.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    result = result.replace(regex, rule.to);
-  }
-  return result;
-}
-
+// ── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  config = loadConfig();
-  logger = createLogger();
-  installConsoleLogger();
+  const cfg = loadConfig();
+  setConfig(cfg);
+  const log = createLogger();
+  installConsoleLogger(log);
+
+  initHotkeys({ setRecording, updateTrayMenu, handleAssistantShortcut });
+
   createWindow();
-
-  if (process.platform === 'darwin') {
-    app.dock.hide();
-  }
-
+  if (process.platform === 'darwin') app.dock.hide();
   Menu.setApplicationMenu(null);
 
-  trayFrames = [
-    buildBusyFrame(0),
-    buildBusyFrame(1),
-    buildBusyFrame(2),
-    buildBusyFrame(3)
-  ];
-
-  tray = new Tray(buildTrayIcon());
+  loadBusyFrames();
+  const tray = new Tray(buildTrayIcon());
+  setMainState({ tray });
   tray.setToolTip('Tray Transcriber');
   updateTrayIcon();
   updateTrayMenu();
 
   registerHotkey();
-  if (config.useWorker) {
+  if (cfg.useWorker) {
     ensureWorker();
-    if (config.workerWarmup) {
-      warmupWorker();
-    }
+    if (cfg.workerWarmup) warmupWorker();
   }
 });
 
-app.on('window-all-closed', (event) => {
-  event.preventDefault();
-});
+app.on('window-all-closed', (event: any) => event.preventDefault());
 
 app.on('before-quit', () => {
   globalShortcut.unregisterAll();
-  if (workerProc) {
-    workerProc.kill();
-  }
+  killWorker();
 });
 
 app.on('activate', () => {
+  const { win } = getMainState();
   if (!win) createWindow();
 });
-
-ipcMain.on('config-updated', (_event, newConfig) => {
-  config = { ...config, ...newConfig };
-  saveConfig(config);
-  logger = createLogger();
-  installConsoleLogger();
-  registerHotkey();
-  updateTrayMenu();
-  restartWorker();
-  reloadAllWindows();
-});
-
-ipcMain.handle('get-config', () => {
-  return { ...config };
-});
-
-function reloadAllWindows() {
-  if (win && !win.isDestroyed()) {
-    win.reload();
-  }
-  if (configWin && !configWin.isDestroyed()) {
-    configWin.reload();
-  }
-}
-
-function restartWorker() {
-  if (workerProc) {
-    workerProc.kill();
-    workerProc = null;
-  }
-  workerReady = false;
-  workerPromise = null;
-  workerWarmupKey = null;
-  if (config.useWorker) {
-    ensureWorker();
-    if (config.workerWarmup) {
-      warmupWorker();
-    }
-  }
-}
-
-async function warmupWorker() {
-  const key = `${config.model}|${config.language || ''}|${config.computeType || ''}|${config.batchSize || ''}`;
-  if (workerWarmupKey === key) return;
-  const ok = await ensureWorker();
-  if (!ok) return;
-  const payload = {
-    engine: config.asrEngine || 'whisperx',
-    model: config.model,
-    language: config.language,
-    compute_type: config.computeType,
-    device: config.device || 'default'
-  };
-  const transport = getWorkerTransport();
-  if (transport === 'stdio') {
-    try {
-      await sendWorkerMessage('warmup', payload, config.workerStartupTimeoutMs || 15000);
-      workerWarmupKey = key;
-    } catch (err) {
-      logger?.error('[worker] warmup failed', err && err.message ? err.message : String(err));
-    }
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    const body = JSON.stringify(payload);
-    const req = http.request(
-      {
-        host: config.workerHost,
-        port: config.workerPort,
-        path: '/warmup',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
-        }
-      },
-      (res) => {
-        res.resume();
-        if (res.statusCode === 200) {
-          workerWarmupKey = key;
-        }
-        resolve();
-      }
-    );
-    req.on('error', () => resolve());
-    req.write(body);
-    req.end();
-  });
-}
-
-function fetchWorkerStatus(context = '') {
-  if (!config.useWorker) {
-    logger?.info('[worker] status: disabled');
-    return;
-  }
-  const transport = getWorkerTransport();
-  if (transport === 'stdio') {
-    sendWorkerMessage('status', {}, 2000)
-      .then((result) => {
-        logger?.info('[worker] status', context || '', JSON.stringify(result));
-      })
-      .catch((err) => {
-        logger?.error('[worker] status request failed', context || '', err && err.message ? err.message : String(err));
-      });
-    return;
-  }
-  const req = http.get(
-    { host: config.workerHost, port: config.workerPort, path: '/status', timeout: 2000 },
-    (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk.toString('utf8');
-      });
-      res.on('end', () => {
-        if (res.statusCode !== 200) {
-          console.log('[worker] status error', context || '', res.statusCode, data);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data);
-          logger?.info('[worker] status', context || '', JSON.stringify(parsed));
-        } catch (err) {
-          logger?.error('[worker] status parse error', context || '', err && err.message ? err.message : String(err));
-        }
-      });
-    }
-  );
-  req.on('error', (err) => {
-    logger?.error('[worker] status request failed', context || '', err.message);
-  });
-  req.on('timeout', () => {
-    req.destroy(new Error('status timeout'));
-  });
-}

@@ -14,8 +14,7 @@
   },
   "include": [
     "main.ts",
-    "renderer.ts",
-    "config.ts",
-    "types/**/*.d.ts"
+    "src/**/*.ts",
+    "vite-env.d.ts"
   ]
 }

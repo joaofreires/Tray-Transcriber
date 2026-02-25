@@ -7,6 +7,15 @@ type RecordingCompletePayload = {
   extension: string;
   size: number;
   durationMs: number;
+  uiSession?: boolean;
+};
+
+type TranscriptReadyPayload = {
+  text: string;
+};
+
+type RecordingStatePayload = {
+  isRecording: boolean;
 };
 
 type DictionaryEntry = {
@@ -64,8 +73,11 @@ type AppConfig = {
 };
 
 type TrayTranscriberApi = {
-  onToggleRecording: (cb: (payload: RecordingPayload) => void) => void;
+  onToggleRecording: (cb: (payload: RecordingPayload) => void) => (() => void) | undefined;
+  onTranscriptReady: (cb: (payload: TranscriptReadyPayload) => void) => (() => void) | undefined;
   notifyRecordingComplete: (data: RecordingCompletePayload) => void;
+  setRecordingState: (payload: RecordingStatePayload) => void;
+  updateTrayIcon: () => void;
   updateConfig: (config: AppConfig) => void;
   getConfig: () => Promise<AppConfig>;
   log: (message: string, data?: unknown) => void;
