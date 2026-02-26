@@ -33,6 +33,19 @@ type AssistantShortcut = {
   prompt: string;
 };
 
+type HistoryEntry = {
+  id: number;
+  sessionId: string;
+  entryType: string;
+  timestamp: number;
+  title: string;
+  preview: string;
+  content: string;
+  metadata: Record<string, unknown>;
+};
+
+type HistorySummary = Omit<HistoryEntry, 'content'>;
+
 type AppConfig = {
   hotkey?: string;
   pressToTalk?: boolean;
@@ -81,6 +94,18 @@ type TrayTranscriberApi = {
   updateConfig: (config: AppConfig) => void;
   getConfig: () => Promise<AppConfig>;
   log: (message: string, data?: unknown) => void;
+  onHistoryUpdated: (cb: () => void) => (() => void) | undefined;
+  getHistorySummaries: (opts?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    entryType?: string;
+    sessionId?: string;
+  }) => Promise<HistorySummary[]>;
+  getHistoryEntry: (id: number) => Promise<HistoryEntry | null>;
+  exportHistory: (targetPath?: string) => Promise<{ path: string; entries: HistoryEntry[] }>;
+  exportHistoryEntry: (id: number, targetPath?: string) => Promise<{ path: string; entry: HistoryEntry | null }>;
+  getWindowType: () => Promise<'main' | 'config' | 'unknown'>;
 };
 
 declare global {

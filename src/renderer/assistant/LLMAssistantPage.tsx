@@ -1,9 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
-
-// reuse types from SettingsPage by redeclaring minimal needed
+import React, { useEffect, useState } from 'react';
 
 type AssistantShortcut = { shortcut: string; prompt: string };
-
 type SettingsConfig = {
   assistantName: string;
   llmEndpoint: string;
@@ -13,7 +10,6 @@ type SettingsConfig = {
   assistantShortcuts: AssistantShortcut[];
 };
 
-// default values (taken from SettingsPage DEFAULT_CONFIG)
 const DEFAULT_CONFIG: SettingsConfig = {
   assistantName: 'Luna',
   llmEndpoint: 'https://api.openai.com/v1/chat/completions',
@@ -22,6 +18,20 @@ const DEFAULT_CONFIG: SettingsConfig = {
   llmSystemPrompt: '',
   assistantShortcuts: []
 };
+
+const panelSurface = 'rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg backdrop-blur-sm';
+const inputClasses =
+  'w-full rounded-2xl border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white placeholder:text-white/40 focus:border-sky-400 focus:outline-none';
+const textAreaClasses = `${inputClasses} min-h-[120px] resize-none`;
+
+function PanelField({ label, children }: React.PropsWithChildren<{ label: string }>) {
+  return (
+    <label className="grid gap-2 text-sm text-white/80">
+      <span className="text-xs uppercase tracking-[0.3em] text-white/60">{label}</span>
+      {children}
+    </label>
+  );
+}
 
 function normalizeConfig(raw: any): SettingsConfig {
   return {
@@ -36,7 +46,7 @@ function normalizeConfig(raw: any): SettingsConfig {
             shortcut: String(entry?.shortcut ?? '').trim(),
             prompt: String(entry?.prompt ?? '').trim()
           }))
-          .filter((e: AssistantShortcut) => !!e.shortcut || !!e.prompt)
+          .filter((entry: AssistantShortcut) => !!entry.shortcut || !!entry.prompt)
       : []
   };
 }
@@ -46,6 +56,7 @@ export default function LLMAssistantPage() {
   const [baseConfig, setBaseConfig] = useState<any>(null);
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'assistant' | 'shortcuts'>('shortcuts');
 
   useEffect(() => {
     (async () => {
@@ -85,150 +96,119 @@ export default function LLMAssistantPage() {
     }
   };
 
-  const tabs: Array<{ id: 'assistant' | 'shortcuts'; label: string }> = useMemo(
-    () => [
-      { id: 'shortcuts', label: 'Shortcuts' },
-      { id: 'assistant', label: 'LLM Settings' },
-    ],
-    []
-  );
-
-  const [activeTab, setActiveTab] = useState<'assistant' | 'shortcuts'>('shortcuts');
-
   if (error) {
-    return <div className="text-red-600 text-sm">Failed to load assistant settings: {error}</div>;
+    return <div className="text-rose-400 text-sm">Failed to load assistant settings: {error}</div>;
   }
   if (!draft) {
-    return <div className="text-gray-500 text-sm">Loading assistant settings…</div>;
+    return <div className="text-white/60 text-sm">Loading assistant settings…</div>;
   }
 
-  return (
-    <div className="mt-2 grid gap-4">
-      <div className="flex flex-wrap gap-1" role="tablist" aria-label="Assistant sections">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`border rounded-lg text-sm font-semibold px-3 py-1 cursor-pointer ${
-              activeTab === tab.id ?
-              'text-gray-900 dark:text-gray-100 border-blue-300 dark:border-blue-400 bg-blue-100 dark:bg-blue-900'
-              : 'border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-gray-400 '
-            }`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
+  const renderAssistantTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <PanelField label="Assistant Name">
+        <input className={inputClasses} value={draft.assistantName} onChange={(e) => update('assistantName', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM Endpoint">
+        <input className={inputClasses} value={draft.llmEndpoint} onChange={(e) => update('llmEndpoint', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM Model">
+        <input className={inputClasses} value={draft.llmModel} onChange={(e) => update('llmModel', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM API Key">
+        <input className={inputClasses} type="password" value={draft.llmApiKey} onChange={(e) => update('llmApiKey', e.target.value)} />
+      </PanelField>
+      <PanelField label="System Prompt">
+        <textarea className={textAreaClasses} value={draft.llmSystemPrompt} onChange={(e) => update('llmSystemPrompt', e.target.value)} />
+      </PanelField>
+    </div>
+  );
+
+  const renderShortcutsTab = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold uppercase tracking-[0.3em] text-white/60">Assistant shortcuts</p>
+        <button
+          type="button"
+          className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white/70 transition hover:border-white/30"
+          onClick={() => update('assistantShortcuts', [...draft.assistantShortcuts, { shortcut: '', prompt: '' }])}
+        >
+          Add shortcut
+        </button>
+      </div>
+      <div className="grid gap-3">
+        {draft.assistantShortcuts.map((entry, index) => (
+          <div key={`shortcut-${index}`} className="space-y-2 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+            <PanelField label="Shortcut">
+              <input
+                className={inputClasses}
+                value={entry.shortcut}
+                placeholder="CommandOrControl+Alt+P"
+                onChange={(e) => {
+                  const next = [...draft.assistantShortcuts];
+                  next[index] = { ...next[index], shortcut: e.target.value };
+                  update('assistantShortcuts', next);
+                }}
+              />
+            </PanelField>
+            <PanelField label="Prompt">
+              <input
+                className={inputClasses}
+                value={entry.prompt}
+                onChange={(e) => {
+                  const next = [...draft.assistantShortcuts];
+                  next[index] = { ...next[index], prompt: e.target.value };
+                  update('assistantShortcuts', next);
+                }}
+              />
+            </PanelField>
+            <button
+              type="button"
+              className="rounded-full border border-rose-400/70 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-100 transition hover:bg-rose-500/20"
+              onClick={() => update('assistantShortcuts', draft.assistantShortcuts.filter((_, i) => i !== index))}
+            >
+              Remove
+            </button>
+          </div>
         ))}
       </div>
+    </div>
+  );
 
-      {activeTab === 'assistant' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Assistant Name</span>
-            <input
-              className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              value={draft.assistantName}
-              onChange={(e) => update('assistantName', e.target.value)}
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">LLM Endpoint</span>
-            <input
-              className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              value={draft.llmEndpoint}
-              onChange={(e) => update('llmEndpoint', e.target.value)}
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">LLM Model</span>
-            <input
-              className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              value={draft.llmModel}
-              onChange={(e) => update('llmModel', e.target.value)}
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">LLM API Key</span>
-            <input
-              className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              type="password"
-              value={draft.llmApiKey}
-              onChange={(e) => update('llmApiKey', e.target.value)}
-            />
-          </label>
-          <label className="col-span-2 grid gap-1">
-            <span className="text-xs text-gray-500">System Prompt</span>
-            <textarea
-              className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              rows={5}
-              value={draft.llmSystemPrompt}
-              onChange={(e) => update('llmSystemPrompt', e.target.value)}
-            />
-          </label>
-        </div>
-      )}
+  const tabButtonClasses = (tabId: 'assistant' | 'shortcuts') =>
+    `rounded-2xl border px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] transition ${
+      activeTab === tabId
+        ? 'border-white/40 bg-white/10 text-white'
+        : 'border-white/10 bg-white/5 text-white/60 hover:border-white/30'
+    }`;
 
-      {activeTab === 'shortcuts' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <div className="grid gap-2 col-span-2">
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-semibold">Assistant shortcuts</span>
-              <button
-                type="button"
-                className="border border-gray-200 text-gray-900 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:border-blue-300 dark:hover:border-blue-400"
-                onClick={() => update('assistantShortcuts', [...draft.assistantShortcuts, { shortcut: '', prompt: '' }])}
-              >
-                Add shortcut
-              </button>
-            </div>
-            <div className="grid gap-1">
-              {draft.assistantShortcuts.map((entry, index) => (
-                <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-1 items-center min-w-0" key={`shortcut-${index}`}>
-                  <label className="block text-xs font-semibold sm:hidden">Shortcut</label>
-                  <input
-                    className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-                    value={entry.shortcut}
-                    placeholder="CommandOrControl+Alt+P"
-                    onChange={(e) => {
-                      const next = [...draft.assistantShortcuts];
-                      next[index] = { ...next[index], shortcut: e.target.value };
-                      update('assistantShortcuts', next);
-                    }}
-                  />
-                  <label className="block text-xs font-semibold sm:hidden">Prompt</label>
-                  <input
-                    className="border border-gray-200 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-                    value={entry.prompt}
-                    placeholder="Prompt"
-                    onChange={(e) => {
-                      const next = [...draft.assistantShortcuts];
-                      next[index] = { ...next[index], prompt: e.target.value };
-                      update('assistantShortcuts', next);
-                    }}
-                  />                  <button
-                    type="button"
-                    className="border border-gray-200 text-gray-900 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:border-blue-300 dark:hover:border-blue-400"
-                    onClick={() => update('assistantShortcuts', draft.assistantShortcuts.filter((_, i) => i !== index))}
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="flex justify-between items-center gap-2">
-        <button type="button" className="border border-gray-200 text-gray-900 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:border-blue-300 dark:hover:border-blue-400" onClick={() => setDraft({ ...DEFAULT_CONFIG })}>Reset Defaults</button>
-        <div className="inline-flex items-center gap-2">
-          {status === 'saved' && <span className="text-xs text-gray-500">Saved</span>}
-          {status === 'error' && <span className="text-xs text-red-600">Save failed</span>}
-          <button type="button" className="border border-gray-200 text-gray-900 bg-blue-500 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:bg-blue-600 hover:border-blue-300 text-white" onClick={save} disabled={status === 'saving'}>
-            {status === 'saving' ? 'Saving…' : 'Save'}
+  return (
+    <div className="space-y-6 text-white">
+      <section className={panelSurface}>
+        <div className="flex flex-wrap gap-3">
+          <button type="button" className={tabButtonClasses('assistant')} onClick={() => setActiveTab('assistant')}>
+            LLM Settings
+          </button>
+          <button type="button" className={tabButtonClasses('shortcuts')} onClick={() => setActiveTab('shortcuts')}>
+            Shortcuts
           </button>
         </div>
-      </div>
+        <div className="mt-6">{activeTab === 'assistant' ? renderAssistantTab() : renderShortcutsTab()}</div>
+      </section>
+
+      <section className={panelSurface}>
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {status === 'saved' && <span className="text-xs uppercase tracking-[0.4em] text-emerald-300">Saved</span>}
+          {status === 'error' && <span className="text-xs uppercase tracking-[0.4em] text-rose-300">Save failed</span>}
+          <button
+            type="button"
+            className="rounded-2xl border border-transparent bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-60"
+            onClick={save}
+            disabled={status === 'saving'}
+          >
+            {status === 'saving' ? 'Saving…' : 'Save Assistant'}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
