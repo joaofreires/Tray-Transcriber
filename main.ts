@@ -3,10 +3,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 import {
   initElectron, setAPP_ROOT, setMainDirname, setConfig, setFetch,
-  config, ipcMain, clipboard, webContents, app, Menu, Tray, nativeImage, globalShortcut, shell
+  config, ipcMain, clipboard, webContents, app, Menu, Tray, nativeImage, globalShortcut, shell, dialog
 } from './src/main/ctx.js';
 import { getMainState, setMainState } from './src/store/main-store.js';
 import { loadConfig, saveConfig, getConfigPath } from './src/main/config-manager.js';
@@ -18,6 +19,15 @@ import { ensureWorker, warmupWorker, restartWorker, runWhisperX, fetchWorkerStat
 import { handleAssistant, handleAssistantShortcut } from './src/main/assistant.js';
 import { tryPaste } from './src/main/paste.js';
 import { normalizeTranscript } from './src/main/transcript.js';
+import {
+  initHistoryStore,
+  recordTranscriptEntry,
+  getHistorySummaries,
+  getHistoryEntry,
+  exportHistorySnapshot,
+  exportHistoryEntry,
+  setHistoryUpdateHook
+} from './src/main/history-store.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -78,6 +88,15 @@ function updateTrayMenu(): void {
   ]));
 }
 
+function broadcastHistoryUpdated(): void {
+  const { win, configWin } = getMainState();
+  [win, configWin].forEach((target) => {
+    if (target && !target.isDestroyed()) {
+      target.webContents.send('history-updated');
+    }
+  });
+}
+
 // ── Transcription pipeline ────────────────────────────────────────────────────
 let transcribeQueue: any[] = [];
 let transcribeRunning = false;
@@ -92,6 +111,22 @@ async function processTranscribeQueue(): Promise<void> {
     console.log('[transcribe] start', { audioPath: next.audioPath, pending: transcribeQueue.length });
     const text = normalizeTranscript(await runWhisperX(next.audioPath));
     console.log('[transcript] len=%d preview=%s', text.length, text.slice(0, 120));
+    if (text) {
+      try {
+        await recordTranscriptEntry({
+          sessionId: next.sessionId,
+          transcript: text,
+          metadata: {
+            ...next.metadata,
+            uiSession: !!next.uiSession,
+            senderId: next.senderId,
+            durationMs: next.durationMs
+          }
+        });
+      } catch (err) {
+        console.error('[history] failed to persist transcript', err);
+      }
+    }
     if (next.uiSession) {
       // Always reply to the UI so isTranscribing and the textarea can update.
       const { win, configWin } = getMainState();
@@ -101,8 +136,14 @@ async function processTranscribeQueue(): Promise<void> {
       };
       sendToRenderers(text);
     } else if (text) {
-      const handled = await handleAssistant(text);
-      if (!handled) {
+      const assistantResponse = await handleAssistant(text, {
+        sessionId: next.sessionId,
+        metadata: {
+          ...next.metadata,
+          source: next.uiSession ? 'ui-recording' : 'background-recording'
+        }
+      });
+      if (!assistantResponse) {
         if (!tryPaste(text)) clipboard.writeText(text);
       }
     }
@@ -122,6 +163,13 @@ async function processTranscribeQueue(): Promise<void> {
   }
 }
 
+function determineWindowType(sender: any): 'main' | 'config' | 'unknown' {
+  const { win, configWin } = getMainState();
+  if (sender === win?.webContents) return 'main';
+  if (sender === configWin?.webContents) return 'config';
+  return 'unknown';
+}
+
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 ipcMain.on('recording-complete', async (event: any, payload: any) => {
   const size = typeof payload?.size === 'number' ? payload.size : (payload?.buffer?.length || 0);
@@ -132,7 +180,23 @@ ipcMain.on('recording-complete', async (event: any, payload: any) => {
   const buffer = Buffer.from(payload.buffer);
   const audioPath = path.join(os.tmpdir(), `tray-transcriber-${Date.now()}.${payload.extension || 'webm'}`);
   fs.writeFileSync(audioPath, buffer);
-  transcribeQueue.push({ audioPath, size, durationMs: payload.durationMs || 0, uiSession: !!payload.uiSession, senderId: event?.sender?.id });
+  const sessionId = typeof payload?.sessionId === 'string' && payload.sessionId.trim()
+    ? payload.sessionId.trim()
+    : randomUUID();
+  const metadata = {
+    size,
+    durationMs: payload.durationMs || 0,
+    uiSession: !!payload.uiSession
+  };
+  transcribeQueue.push({
+    audioPath,
+    size,
+    durationMs: payload.durationMs || 0,
+    uiSession: !!payload.uiSession,
+    senderId: event?.sender?.id,
+    sessionId,
+    metadata
+  });
   console.log('[queue] enqueued', { pending: transcribeQueue.length });
   processTranscribeQueue();
 });
@@ -176,12 +240,67 @@ ipcMain.on('config-updated', (_event: any, newConfig: any) => {
 
 ipcMain.handle('get-config', () => ({ ...config }));
 
+ipcMain.handle('history-get-summaries', async (_event, opts: any) => {
+  return getHistorySummaries(opts ?? {});
+});
+
+ipcMain.handle('history-get-entry', async (_event, id: number) => {
+  return getHistoryEntry(Number(id));
+});
+
+ipcMain.handle('get-window-type', (event) => {
+  return determineWindowType(event.sender);
+});
+
+ipcMain.handle('history-export', async (_event, targetPath?: string) => {
+  let finalPath = targetPath;
+  if (!finalPath) {
+    const defaultPath = path.join(app?.getPath('desktop') || process.cwd(), 'tray-history.json');
+    const dialogResult = await dialog.showSaveDialog({
+      title: 'Export history',
+      defaultPath,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (dialogResult.canceled) {
+      return { path: '', entries: [] };
+    }
+    finalPath = dialogResult.filePath ?? defaultPath;
+  }
+  return exportHistorySnapshot(finalPath);
+});
+
+ipcMain.handle('history-export-entry', async (_event, opts: any) => {
+  const entryId = typeof opts === 'number' ? opts : Number(opts?.id);
+  if (!entryId || Number.isNaN(entryId)) {
+    throw new Error('history entry id required');
+  }
+  let finalPath = opts?.targetPath;
+  if (!finalPath) {
+    const entry = await getHistoryEntry(entryId);
+    if (!entry) return { path: '', entry: null };
+    const defaultPath = path.join(app?.getPath('desktop') || process.cwd(), `tray-history-${entry.entryType}-${entry.id}.json`);
+    const dialogResult = await dialog.showSaveDialog({
+      title: 'Export history entry',
+      defaultPath,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (dialogResult.canceled) {
+      return { path: '', entry: null };
+    }
+    finalPath = dialogResult.filePath ?? defaultPath;
+  }
+  return exportHistoryEntry(entryId, finalPath);
+});
+
 // ── App lifecycle ─────────────────────────────────────────────────────────────
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const cfg = loadConfig();
   setConfig(cfg);
   const log = createLogger();
   installConsoleLogger(log);
+
+  await initHistoryStore();
+  setHistoryUpdateHook(broadcastHistoryUpdated);
 
   initHotkeys({ setRecording, updateTrayMenu, handleAssistantShortcut });
 

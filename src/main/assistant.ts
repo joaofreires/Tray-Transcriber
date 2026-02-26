@@ -2,10 +2,15 @@ import { createRequire } from 'node:module';
 import { config, clipboard, fetchFn } from './ctx.js';
 import { tryPaste, getSelectedText } from './paste.js';
 import { setTrayBusy } from './tray-manager.js';
+import { recordAssistantExchange } from './history-store.js';
 const require = createRequire(import.meta.url);
 
 // Per-session conversation history.
 let llmHistory: Array<{ role: string; content: string }> = [];
+type AssistantCallOptions = {
+  sessionId?: string;
+  metadata?: Record<string, unknown>;
+};
 
 // ── LLM client ────────────────────────────────────────────────────────────────
 export async function callLLM(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
@@ -94,8 +99,8 @@ export function shouldHandleAsAssistant(text: string): boolean {
   return new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(text.trim());
 }
 
-export async function handleAssistant(text: string): Promise<boolean> {
-  if (!shouldHandleAsAssistant(text)) return false;
+export async function handleAssistant(text: string, opts?: AssistantCallOptions): Promise<string | null> {
+  if (!shouldHandleAsAssistant(text)) return null;
   const name = config.assistantName.trim();
   const remainder = text.trim().replace(new RegExp('^' + name, 'i'), '').trim();
   const selection = await getSelectedText();
@@ -106,14 +111,31 @@ export async function handleAssistant(text: string): Promise<boolean> {
     const ctx = { firstChunk: true, failed: false, typed: 0, selection };
     const response = await callLLM(prompt, (chunk) => tryStreamPaste(chunk, ctx));
     console.log('[assistant] response=', response);
-    if (response) { recordHistory(prompt, response); await finalizePaste(response, ctx); }
+    if (response) {
+      recordHistory(prompt, response);
+      const historyMetadata = {
+        ...(opts?.metadata ?? {}),
+        source: opts?.metadata?.source ?? 'assistant'
+      };
+      try {
+        await recordAssistantExchange({
+          sessionId: opts?.sessionId,
+          prompt,
+          response,
+          metadata: historyMetadata
+        });
+      } catch (err) {
+        console.error('[assistant] history record failed', err);
+      }
+      await finalizePaste(response, ctx);
+    }
+    return response;
   } catch (err) {
     console.error('[assistant] error', err);
-    return false;
+    return null;
   } finally {
     setTrayBusy(false);
   }
-  return true;
 }
 
 export async function handleAssistantShortcut(basePrompt: string): Promise<void> {
@@ -125,7 +147,19 @@ export async function handleAssistantShortcut(basePrompt: string): Promise<void>
     const ctx = { firstChunk: true, failed: false, typed: 0, selection };
     const response = await callLLM(prompt, (chunk) => tryStreamPaste(chunk, ctx));
     console.log('[assistant] shortcut response=', response);
-    if (response) { recordHistory(prompt, response); await finalizePaste(response, ctx); }
+    if (response) {
+      recordHistory(prompt, response);
+      try {
+        await recordAssistantExchange({
+          prompt,
+          response,
+          metadata: { source: 'shortcut' }
+        });
+      } catch (err) {
+        console.error('[assistant] shortcut history record failed', err);
+      }
+      await finalizePaste(response, ctx);
+    }
   } catch (err) {
     console.error('[assistant] shortcut error', err);
   } finally {

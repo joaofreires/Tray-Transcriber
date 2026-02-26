@@ -41,7 +41,6 @@ type SettingsConfig = {
   pythonPath: string;
   disableCuda: boolean;
   forceNoWeightsOnlyLoad: boolean;
-  // when true the UI will show a spinning/wait cursor during busy states
   cursorBusy: boolean;
 };
 
@@ -124,6 +123,37 @@ function normalizeConfig(raw: any): SettingsConfig {
   };
 }
 
+const panelSurface = 'rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg backdrop-blur-sm';
+const inputClasses =
+  'w-full rounded-2xl border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white placeholder:text-white/40 focus:border-sky-400 focus:outline-none';
+const selectClasses = `${inputClasses} bg-slate-950/60`;
+const textAreaClasses = `${inputClasses} min-h-[120px] resize-none`;
+
+type PanelFieldProps = React.PropsWithChildren<{ label: string; className?: string }>;
+
+function PanelField({ label, children, className }: PanelFieldProps) {
+  return (
+    <label className={`grid gap-2 text-sm text-white/80 ${className ?? ''}`}>
+      <span className="text-xs uppercase tracking-[0.3em] text-white/60">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label className="inline-flex items-center gap-2 text-sm text-white/80">
+      <input
+        type="checkbox"
+        className="h-4 w-4 rounded border border-white/30 bg-slate-950 text-emerald-400 focus:ring-emerald-400"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      {label}
+    </label>
+  );
+}
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('stt');
   const [draft, setDraft] = useState<SettingsConfig | null>(null);
@@ -146,6 +176,8 @@ export default function SettingsPage() {
       { id: 'stt', label: 'STT Model' },
       { id: 'worker', label: 'Worker' },
       { id: 'general', label: 'General' },
+      { id: 'assistant', label: 'LLM' },
+      { id: 'shortcuts', label: 'Assistant Shortcuts' },
       { id: 'advanced', label: 'Advanced' }
     ],
     []
@@ -175,241 +207,301 @@ export default function SettingsPage() {
   };
 
   if (error) {
-    return <div className="text-red-600 text-sm">Failed to load settings: {error}</div>;
+    return <div className="text-rose-400 text-sm">Failed to load settings: {error}</div>;
   }
 
   if (!draft) {
-    return <div className="text-gray-500 text-sm">Loading settings…</div>;
+    return <div className="text-white/60 text-sm">Loading settings…</div>;
   }
 
-  return (
-    <div className="mt-2 grid gap-4">
-      <div className="flex flex-wrap gap-1" role="tablist" aria-label="Settings sections">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`border rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer shadow-sm ${
-              activeTab === tab.id
-                ? ' text-gray-900 dark:text-white border-blue-300 dark:border-blue-300 bg-blue-100 dark:bg-blue-900'
-                : ' border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-gray-400 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer shadow-sm hover:bg-gray-200 dark:hover:bg-slate-600'
-            }`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
+  const renderSttTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <PanelField label="ASR Engine">
+        <select className={selectClasses} value={draft.asrEngine} onChange={(e) => update('asrEngine', e.target.value)}>
+          <option value="whisperx">whisperx</option>
+          <option value="whisper">whisper</option>
+          <option value="faster-whisper">faster-whisper</option>
+        </select>
+      </PanelField>
+      <PanelField label="Model">
+        <select className={selectClasses} value={draft.model} onChange={(e) => update('model', e.target.value)}>
+          <option value="tiny">tiny</option>
+          <option value="base">base</option>
+          <option value="small">small</option>
+          <option value="medium">medium</option>
+          <option value="large">large</option>
+        </select>
+      </PanelField>
+      <PanelField label="Language">
+        <input className={inputClasses} value={draft.language} placeholder="en (blank = auto)" onChange={(e) => update('language', e.target.value)} />
+      </PanelField>
+      <PanelField label="Device">
+        <select className={selectClasses} value={draft.device} onChange={(e) => update('device', e.target.value)}>
+          <option value="default">default</option>
+          <option value="cpu">cpu</option>
+          <option value="gpu">gpu</option>
+        </select>
+      </PanelField>
+      <PanelField label="Compute Type">
+        <select className={selectClasses} value={draft.computeType} onChange={(e) => update('computeType', e.target.value)}>
+          <option value="int8">int8</option>
+          <option value="int8_float16">int8_float16</option>
+          <option value="int16">int16</option>
+          <option value="float32">float32</option>
+        </select>
+      </PanelField>
+      <PanelField label="Batch Size">
+        <input
+          className={inputClasses}
+          type="number"
+          min={1}
+          max={32}
+          value={draft.batchSize}
+          onChange={(e) => update('batchSize', Number(e.target.value || 4))}
+        />
+      </PanelField>
+      <div className="flex flex-wrap items-center gap-4">
+        <ToggleField label="Skip alignment" checked={draft.noAlign} onChange={(value) => update('noAlign', value)} />
+      </div>
+      <PanelField label="Prompt Prefix">
+        <textarea className={textAreaClasses} value={draft.prompt} onChange={(e) => update('prompt', e.target.value)} />
+      </PanelField>
+      <PanelField label="Prompt Mode">
+        <select className={selectClasses} value={draft.promptMode} onChange={(e) => update('promptMode', e.target.value)}>
+          <option value="append">append</option>
+          <option value="prepend">prepend</option>
+          <option value="replace">replace</option>
+        </select>
+      </PanelField>
+    </div>
+  );
+
+  const renderWorkerTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <ToggleField label="Use background worker" checked={draft.useWorker} onChange={(value) => update('useWorker', value)} />
+      <ToggleField label="Warmup worker on startup" checked={draft.workerWarmup} onChange={(value) => update('workerWarmup', value)} />
+      <PanelField label="Transport">
+        <select className={selectClasses} value={draft.workerTransport} onChange={(e) => update('workerTransport', e.target.value)}>
+          <option value="stdio">stdio</option>
+          <option value="http">http</option>
+        </select>
+      </PanelField>
+      <PanelField label="Worker Host">
+        <input className={inputClasses} value={draft.workerHost} onChange={(e) => update('workerHost', e.target.value)} />
+      </PanelField>
+      <PanelField label="Worker Port">
+        <input
+          className={inputClasses}
+          type="number"
+          value={draft.workerPort}
+          onChange={(e) => update('workerPort', Number(e.target.value || 8765))}
+        />
+      </PanelField>
+      <PanelField label="Request Timeout (ms)">
+        <input
+          className={inputClasses}
+          type="number"
+          value={draft.workerRequestTimeoutMs}
+          onChange={(e) => update('workerRequestTimeoutMs', Number(e.target.value || 600000))}
+        />
+      </PanelField>
+      <PanelField label="Status Poll (ms)">
+        <input
+          className={inputClasses}
+          type="number"
+          value={draft.workerStatusPollMs}
+          onChange={(e) => update('workerStatusPollMs', Number(e.target.value || 30000))}
+        />
+      </PanelField>
+      <PanelField label="Min Recording Bytes">
+        <input
+          className={inputClasses}
+          type="number"
+          value={draft.minRecordingBytes}
+          onChange={(e) => update('minRecordingBytes', Number(e.target.value || 200))}
+        />
+      </PanelField>
+    </div>
+  );
+
+  const renderGeneralTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <PanelField label="Hotkey">
+        <input className={inputClasses} value={draft.hotkey} onChange={(e) => update('hotkey', e.target.value)} />
+      </PanelField>
+      <PanelField label="Paste Mode">
+        <select className={selectClasses} value={draft.pasteMode} onChange={(e) => update('pasteMode', e.target.value)}>
+          <option value="clipboard">Clipboard only</option>
+          <option value="paste">Auto-paste</option>
+        </select>
+      </PanelField>
+      <ToggleField label="Press-to-talk" checked={draft.pressToTalk} onChange={(value) => update('pressToTalk', value)} />
+      <ToggleField label="Hold-to-talk" checked={draft.holdToTalk} onChange={(value) => update('holdToTalk', value)} />
+      <ToggleField
+        label="Stop hold-to-talk when modifier releases"
+        checked={draft.holdStopOnModifierRelease}
+        onChange={(value) => update('holdStopOnModifierRelease', value)}
+      />
+      <ToggleField label="Show busy cursor during processing" checked={draft.cursorBusy} onChange={(value) => update('cursorBusy', value)} />
+    </div>
+  );
+
+  const renderAdvancedTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <PanelField label="Log Level">
+        <select className={selectClasses} value={draft.logLevel} onChange={(e) => update('logLevel', e.target.value)}>
+          <option value="auto">auto</option>
+          <option value="silent">silent</option>
+          <option value="error">error</option>
+          <option value="info">info</option>
+          <option value="debug">debug</option>
+        </select>
+      </PanelField>
+      <PanelField label="Python Path (optional)">
+        <input className={inputClasses} value={draft.pythonPath} onChange={(e) => update('pythonPath', e.target.value)} />
+      </PanelField>
+      <ToggleField label="Disable CUDA" checked={draft.disableCuda} onChange={(value) => update('disableCuda', value)} />
+      <ToggleField
+        label="Force non-weights-only torch load"
+        checked={draft.forceNoWeightsOnlyLoad}
+        onChange={(value) => update('forceNoWeightsOnlyLoad', value)}
+      />
+    </div>
+  );
+
+  const renderAssistantTab = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <PanelField label="Assistant Name">
+        <input className={inputClasses} value={draft.assistantName} onChange={(e) => update('assistantName', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM Endpoint">
+        <input className={inputClasses} value={draft.llmEndpoint} onChange={(e) => update('llmEndpoint', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM Model">
+        <input className={inputClasses} value={draft.llmModel} onChange={(e) => update('llmModel', e.target.value)} />
+      </PanelField>
+      <PanelField label="LLM API Key">
+        <input className={inputClasses} type="password" value={draft.llmApiKey} onChange={(e) => update('llmApiKey', e.target.value)} />
+      </PanelField>
+      <PanelField label="System Prompt">
+        <textarea className={textAreaClasses} value={draft.llmSystemPrompt} onChange={(e) => update('llmSystemPrompt', e.target.value)} />
+      </PanelField>
+    </div>
+  );
+
+  const renderShortcutsTab = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold uppercase tracking-[0.3em] text-white/60">Assistant shortcuts</p>
+        <button
+          type="button"
+          className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white/70 transition hover:border-white/30"
+          onClick={() => update('assistantShortcuts', [...draft.assistantShortcuts, { shortcut: '', prompt: '' }])}
+        >
+          Add shortcut
+        </button>
+      </div>
+      <div className="grid gap-3">
+        {draft.assistantShortcuts.map((entry, index) => (
+          <div key={`shortcut-${index}`} className="space-y-2 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+            <PanelField label="Shortcut">
+              <input
+                className={inputClasses}
+                value={entry.shortcut}
+                placeholder="CommandOrControl+Alt+P"
+                onChange={(e) => {
+                  const next = [...draft.assistantShortcuts];
+                  next[index] = { ...next[index], shortcut: e.target.value };
+                  update('assistantShortcuts', next);
+                }}
+              />
+            </PanelField>
+            <PanelField label="Prompt">
+              <input
+                className={inputClasses}
+                value={entry.prompt}
+                onChange={(e) => {
+                  const next = [...draft.assistantShortcuts];
+                  next[index] = { ...next[index], prompt: e.target.value };
+                  update('assistantShortcuts', next);
+                }}
+              />
+            </PanelField>
+            <button
+              type="button"
+              className="rounded-full border border-rose-400/70 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-100 transition hover:bg-rose-500/20"
+              onClick={() => update('assistantShortcuts', draft.assistantShortcuts.filter((_, i) => i !== index))}
+            >
+              Remove
+            </button>
+          </div>
         ))}
       </div>
+    </div>
+  );
 
-      {activeTab === 'stt' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">ASR Engine</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.asrEngine} onChange={(e) => update('asrEngine', e.target.value)}>
-              <option value="whisperx">whisperx</option>
-              <option value="whisper">whisper</option>
-              <option value="faster-whisper">faster-whisper</option>
-            </select>
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Model</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.model} onChange={(e) => update('model', e.target.value)}>
-              <option value="tiny">tiny</option>
-              <option value="base">base</option>
-              <option value="small">small</option>
-              <option value="medium">medium</option>
-              <option value="large">large</option>
-            </select>
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Language</span>
-            <input className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.language} onChange={(e) => update('language', e.target.value)} placeholder="en (blank = auto)" />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Device</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.device} onChange={(e) => update('device', e.target.value)}>
-              <option value="default">default</option>
-              <option value="cpu">cpu</option>
-              <option value="gpu">gpu</option>
-            </select>
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Compute Type</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.computeType} onChange={(e) => update('computeType', e.target.value)}>
-              <option value="int8">int8</option>
-              <option value="int8_float16">int8_float16</option>
-              <option value="int16">int16</option>
-              <option value="float32">float32</option>
-            </select>
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Batch Size</span>
-            <input
-              className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              type="number"
-              min={1}
-              max={32}
-              value={draft.batchSize}
-              onChange={(e) => update('batchSize', Number(e.target.value || 4))}
-            />
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input type="checkbox" className="mr-1" checked={draft.noAlign} onChange={(e) => update('noAlign', e.target.checked)} />
-            Skip Alignment
-          </label>
+  const activeTabContent = () => {
+    switch (activeTab) {
+      case 'stt':
+        return renderSttTab();
+      case 'worker':
+        return renderWorkerTab();
+      case 'general':
+        return renderGeneralTab();
+      case 'advanced':
+        return renderAdvancedTab();
+      case 'assistant':
+        return renderAssistantTab();
+      case 'shortcuts':
+        return renderShortcutsTab();
+      default:
+        return null;
+    }
+  };
 
-          <label className="col-span-2 grid gap-1">
-            <span className="text-xs text-gray-500">Prompt Prefix</span>
-            <textarea className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.prompt} onChange={(e) => update('prompt', e.target.value)} />
-          </label>
+  const tabButtonClasses = (tabId: SettingsTab) =>
+    `rounded-2xl border px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] transition ${
+      activeTab === tabId
+        ? 'border-white/40 bg-white/10 text-white'
+        : 'border-white/10 bg-white/5 text-white/60 hover:border-white/30'
+    }`;
 
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Prompt Mode</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.promptMode} onChange={(e) => update('promptMode', e.target.value)}>
-              <option value="append">append</option>
-              <option value="prepend">prepend</option>
-              <option value="replace">replace</option>
-            </select>
-          </label>
+  return (
+    <div className="space-y-6 text-white">
+      <section className={panelSurface}>
+        <div className="flex flex-wrap gap-3">
+          {tabs.map((tab) => (
+            <button key={tab.id} type="button" className={tabButtonClasses(tab.id)} onClick={() => setActiveTab(tab.id)}>
+              {tab.label}
+            </button>
+          ))}
         </div>
-      )}
+        <div className="mt-6 space-y-6">{activeTabContent()}</div>
+      </section>
 
-
-
-      {activeTab === 'worker' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.useWorker} onChange={(e) => update('useWorker', e.target.checked)} />
-            Use background worker
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.workerWarmup} onChange={(e) => update('workerWarmup', e.target.checked)} />
-            Warmup worker on startup
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Transport</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.workerTransport} onChange={(e) => update('workerTransport', e.target.value)}>
-              <option value="stdio">stdio</option>
-              <option value="http">http</option>
-            </select>
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Worker Host</span>
-            <input className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.workerHost} onChange={(e) => update('workerHost', e.target.value)} />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Worker Port</span>
-            <input className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" type="number" value={draft.workerPort} onChange={(e) => update('workerPort', Number(e.target.value || 8765))} />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Request Timeout (ms)</span>
-            <input
-              className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              type="number"
-              value={draft.workerRequestTimeoutMs}
-              onChange={(e) => update('workerRequestTimeoutMs', Number(e.target.value || 600000))}
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Status Poll (ms)</span>
-            <input
-              className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              type="number"
-              value={draft.workerStatusPollMs}
-              onChange={(e) => update('workerStatusPollMs', Number(e.target.value || 30000))}
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Min Recording Bytes</span>
-            <input
-              className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm"
-              type="number"
-              value={draft.minRecordingBytes}
-              onChange={(e) => update('minRecordingBytes', Number(e.target.value || 200))}
-            />
-          </label>
-        </div>
-      )}
-
-      {activeTab === 'general' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Hotkey</span>
-            <input className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.hotkey} onChange={(e) => update('hotkey', e.target.value)} />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Paste Mode</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.pasteMode} onChange={(e) => update('pasteMode', e.target.value)}>
-              <option value="clipboard">Clipboard only</option>
-              <option value="paste">Auto-paste</option>
-            </select>
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.pressToTalk} onChange={(e) => update('pressToTalk', e.target.checked)} />
-            Press-to-talk
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.holdToTalk} onChange={(e) => update('holdToTalk', e.target.checked)} />
-            Hold-to-talk
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input
-              className="mr-1"
-              type="checkbox"
-              checked={draft.holdStopOnModifierRelease}
-              onChange={(e) => update('holdStopOnModifierRelease', e.target.checked)}
-            />
-            Stop hold-to-talk when modifier releases
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.cursorBusy} onChange={(e) => update('cursorBusy', e.target.checked)} />
-            Show busy cursor during processing
-          </label>
-        </div>
-      )}
-
-      {activeTab === 'advanced' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <label className="grid gap-1">
-            <span className="text-xs text-gray-500">Log Level</span>
-            <select className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.logLevel} onChange={(e) => update('logLevel', e.target.value)}>
-              <option value="auto">auto</option>
-              <option value="silent">silent</option>
-              <option value="error">error</option>
-              <option value="info">info</option>
-              <option value="debug">debug</option>
-            </select>
-          </label>
-          <label className="col-span-2 grid gap-1">
-            <span className="text-xs text-gray-500">Python Path (optional)</span>
-            <input className="border border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 text-gray-900 rounded-lg px-2 py-1 text-sm" value={draft.pythonPath} onChange={(e) => update('pythonPath', e.target.value)} />
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input className="mr-1" type="checkbox" checked={draft.disableCuda} onChange={(e) => update('disableCuda', e.target.checked)} />
-            Disable CUDA
-          </label>
-          <label className="inline-flex items-center gap-1 text-sm text-gray-900">
-            <input
-              className="mr-1"
-              type="checkbox"
-              checked={draft.forceNoWeightsOnlyLoad}
-              onChange={(e) => update('forceNoWeightsOnlyLoad', e.target.checked)}
-            />
-            Force non-weights-only torch load
-          </label>
-        </div>
-      )}
-
-      <div className="flex justify-between items-center gap-2">
-        <button type="button" className="border border-gray-200 dark:border-gray-700 text-gray-900 bg-white dark:bg-slate-700 dark:border-gray-600 dark:text-gray-100 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:border-blue-300 dark:hover:border-blue-400" onClick={resetDefaults}>Reset Defaults</button>
-        <div className="inline-flex items-center gap-2">
-          {status === 'saved' && <span className="text-xs text-gray-500">Saved</span>}
-          {status === 'error' && <span className="text-xs text-red-600">Save failed</span>}
-          <button type="button" className="border border-gray-200 dark:border-gray-700 text-gray-900 dark:border-gray-600 bg-blue-500 dark:bg-blue-500 rounded-lg text-sm font-semibold px-3 py-2 cursor-pointer hover:bg-blue-600 dark:hover:bg-blue-600 hover:border-blue-300 dark:hover:border-blue-400 text-white" onClick={save} disabled={status === 'saving'}>
-            {status === 'saving' ? 'Saving…' : 'Save Settings'}
+      <section className={panelSurface}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30"
+            onClick={resetDefaults}
+          >
+            Reset defaults
           </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {status === 'saved' && <span className="text-xs uppercase tracking-[0.4em] text-emerald-300">Saved</span>}
+            {status === 'error' && <span className="text-xs uppercase tracking-[0.4em] text-rose-300">Save failed</span>}
+            <button
+              type="button"
+              className="rounded-2xl border border-transparent bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-60"
+              onClick={save}
+              disabled={status === 'saving'}
+            >
+              {status === 'saving' ? 'Saving…' : 'Save Settings'}
+            </button>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

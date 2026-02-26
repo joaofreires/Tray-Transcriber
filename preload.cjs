@@ -21,5 +21,15 @@ contextBridge.exposeInMainWorld('trayTranscriber', {
     ipcRenderer.on('cursor-busy', handler);
     return () => ipcRenderer.removeListener('cursor-busy', handler);
   },
+  getWindowType: () => ipcRenderer.invoke('get-window-type'),
+  onHistoryUpdated: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('history-updated', handler);
+    return () => ipcRenderer.removeListener('history-updated', handler);
+  },
+  getHistorySummaries: (opts) => ipcRenderer.invoke('history-get-summaries', opts),
+  getHistoryEntry: (id) => ipcRenderer.invoke('history-get-entry', id),
+  exportHistory: (targetPath) => ipcRenderer.invoke('history-export', targetPath),
+  exportHistoryEntry: (id, targetPath) => ipcRenderer.invoke('history-export-entry', { id, targetPath }),
   log: (message, data) => ipcRenderer.send('debug-log', { message, data })
 });
