@@ -65,20 +65,28 @@ export default function DictionaryPage() {
   const save = () => {
     if (!draft) return;
     setStatus('saving');
-    try {
-      window.trayTranscriber?.updateConfig?.({
+    (async () => {
+      try {
+        const result = await window.trayTranscriber?.updateConfig?.({
         ...(baseConfig ?? {}),
         dictionary: draft.dictionary,
         dictionaryCorrections: draft.dictionaryCorrections,
         includeDictionaryInPrompt: draft.includeDictionaryInPrompt,
         includeDictionaryDescriptions: draft.includeDictionaryDescriptions
       });
+        if (!result || !result.ok) {
+          const first = result && !result.ok && result.errors?.[0]?.message ? result.errors[0].message : 'Validation failed';
+          setStatus('error');
+          setError(first);
+          return;
+        }
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 1400);
-    } catch (err) {
-      setStatus('error');
-      setError(String(err));
-    }
+      } catch (err) {
+        setStatus('error');
+        setError(String(err));
+      }
+    })();
   };
 
   if (error) {

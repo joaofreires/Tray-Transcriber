@@ -1,13 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-type DictionaryEntry = { term: string; description: string };
-type CorrectionEntry = { from: string; to: string };
-type AssistantShortcut = { shortcut: string; prompt: string };
+type SaveConfigResult =
+  | { ok: true; warnings?: Array<{ code: string; message: string }> }
+  | { ok: false; code: string; errors: Array<{ code: string; message: string }> };
 
 type SettingsConfig = {
-  hotkey: string;
-  pressToTalk: boolean;
-  holdToTalk: boolean;
   pasteMode: string;
   asrEngine: string;
   model: string;
@@ -16,16 +13,11 @@ type SettingsConfig = {
   computeType: string;
   batchSize: number;
   noAlign: boolean;
-  dictionary: DictionaryEntry[];
-  dictionaryCorrections: CorrectionEntry[];
   assistantName: string;
   llmEndpoint: string;
   llmModel: string;
   llmApiKey: string;
   llmSystemPrompt: string;
-  assistantShortcuts: AssistantShortcut[];
-  includeDictionaryInPrompt: boolean;
-  includeDictionaryDescriptions: boolean;
   prompt: string;
   promptMode: string;
   useWorker: boolean;
@@ -36,7 +28,6 @@ type SettingsConfig = {
   workerRequestTimeoutMs: number;
   workerStatusPollMs: number;
   minRecordingBytes: number;
-  holdStopOnModifierRelease: boolean;
   logLevel: string;
   pythonPath: string;
   disableCuda: boolean;
@@ -44,12 +35,25 @@ type SettingsConfig = {
   cursorBusy: boolean;
 };
 
-type SettingsTab = 'general' | 'stt' | 'assistant' | 'shortcuts' | 'worker' | 'advanced';
+type SettingsTab = 'general' | 'stt' | 'assistant' | 'worker' | 'advanced';
+
+function normalizeLlmHostInput(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)
+    ? raw
+    : /^(localhost|\d+\.\d+\.\d+\.\d+)(:\d+)?$/i.test(raw)
+      ? `http://${raw}`
+      : `https://${raw}`;
+  try {
+    const parsed = new URL(withScheme);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (_err) {
+    return raw.replace(/\/+$/, '');
+  }
+}
 
 const DEFAULT_CONFIG: SettingsConfig = {
-  hotkey: 'CommandOrControl+Shift+Space',
-  pressToTalk: true,
-  holdToTalk: false,
   pasteMode: 'clipboard',
   asrEngine: 'whisperx',
   model: 'small',
@@ -58,16 +62,11 @@ const DEFAULT_CONFIG: SettingsConfig = {
   computeType: 'int8',
   batchSize: 4,
   noAlign: false,
-  dictionary: [],
-  dictionaryCorrections: [],
   assistantName: 'Luna',
-  llmEndpoint: 'https://api.openai.com/v1/chat/completions',
+  llmEndpoint: 'https://api.openai.com',
   llmModel: 'gpt-5-nano',
   llmApiKey: '',
   llmSystemPrompt: '',
-  assistantShortcuts: [],
-  includeDictionaryInPrompt: true,
-  includeDictionaryDescriptions: false,
   prompt: '',
   promptMode: 'append',
   useWorker: true,
@@ -78,7 +77,6 @@ const DEFAULT_CONFIG: SettingsConfig = {
   workerRequestTimeoutMs: 600000,
   workerStatusPollMs: 30000,
   minRecordingBytes: 200,
-  holdStopOnModifierRelease: false,
   logLevel: 'auto',
   pythonPath: '',
   disableCuda: false,
@@ -90,36 +88,12 @@ function normalizeConfig(raw: any): SettingsConfig {
   return {
     ...DEFAULT_CONFIG,
     ...raw,
-    dictionary: Array.isArray(raw?.dictionary)
-      ? raw.dictionary
-          .map((entry: any) => {
-            if (typeof entry === 'string') {
-              return { term: entry.trim(), description: '' };
-            }
-
-            return {
-              term: String(entry?.term ?? entry?.word ?? '').trim(),
-              description: String(entry?.description ?? '').trim()
-            };
-          })
-          .filter((entry: DictionaryEntry) => !!entry.term)
-      : [],
-    dictionaryCorrections: Array.isArray(raw?.dictionaryCorrections)
-      ? raw.dictionaryCorrections
-          .map((entry: any) => ({
-            from: String(entry?.from ?? '').trim(),
-            to: String(entry?.to ?? '').trim()
-          }))
-          .filter((entry: CorrectionEntry) => !!entry.from || !!entry.to)
-      : [],
-    assistantShortcuts: Array.isArray(raw?.assistantShortcuts)
-      ? raw.assistantShortcuts
-          .map((entry: any) => ({
-            shortcut: String(entry?.shortcut ?? '').trim(),
-            prompt: String(entry?.prompt ?? '').trim()
-          }))
-          .filter((entry: AssistantShortcut) => !!entry.shortcut || !!entry.prompt)
-      : []
+    llmEndpoint: normalizeLlmHostInput(raw?.llmEndpoint ?? DEFAULT_CONFIG.llmEndpoint),
+    batchSize: Number(raw?.batchSize || DEFAULT_CONFIG.batchSize),
+    workerPort: Number(raw?.workerPort || DEFAULT_CONFIG.workerPort),
+    workerRequestTimeoutMs: Number(raw?.workerRequestTimeoutMs || DEFAULT_CONFIG.workerRequestTimeoutMs),
+    workerStatusPollMs: Number(raw?.workerStatusPollMs || DEFAULT_CONFIG.workerStatusPollMs),
+    minRecordingBytes: Number(raw?.minRecordingBytes || DEFAULT_CONFIG.minRecordingBytes)
   };
 }
 
@@ -156,14 +130,17 @@ function ToggleField({ label, checked, onChange }: { label: string; checked: boo
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('stt');
+  const [baseConfig, setBaseConfig] = useState<any>(null);
   const [draft, setDraft] = useState<SettingsConfig | null>(null);
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
   useEffect(() => {
     (async () => {
       try {
         const cfg = await window.trayTranscriber?.getConfig?.();
+        setBaseConfig(cfg ?? {});
         setDraft(normalizeConfig(cfg ?? {}));
       } catch (err) {
         setError(String(err));
@@ -177,7 +154,6 @@ export default function SettingsPage() {
       { id: 'worker', label: 'Worker' },
       { id: 'general', label: 'General' },
       { id: 'assistant', label: 'LLM' },
-      { id: 'shortcuts', label: 'Assistant Shortcuts' },
       { id: 'advanced', label: 'Advanced' }
     ],
     []
@@ -186,13 +162,25 @@ export default function SettingsPage() {
   const update = <K extends keyof SettingsConfig>(key: K, value: SettingsConfig[K]) => {
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
     setStatus('idle');
+    setValidationErrors([]);
   };
 
   const save = async () => {
     if (!draft) return;
     setStatus('saving');
+    setValidationErrors([]);
+
     try {
-      window.trayTranscriber?.updateConfig?.(draft);
+      const payload = { ...(baseConfig ?? {}), ...draft };
+      payload.llmEndpoint = normalizeLlmHostInput(payload.llmEndpoint);
+      const result = (await window.trayTranscriber?.updateConfig?.(payload)) as SaveConfigResult | undefined;
+      if (!result || !result.ok) {
+        const errors = result && !result.ok && Array.isArray(result.errors) ? result.errors.map((entry) => entry.message) : ['Configuration save failed.'];
+        setValidationErrors(errors);
+        setStatus('error');
+        return;
+      }
+
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 1400);
     } catch (err) {
@@ -204,6 +192,7 @@ export default function SettingsPage() {
   const resetDefaults = () => {
     setDraft({ ...DEFAULT_CONFIG });
     setStatus('idle');
+    setValidationErrors([]);
   };
 
   if (error) {
@@ -326,22 +315,12 @@ export default function SettingsPage() {
 
   const renderGeneralTab = () => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      <PanelField label="Hotkey">
-        <input className={inputClasses} value={draft.hotkey} onChange={(e) => update('hotkey', e.target.value)} />
-      </PanelField>
-      <PanelField label="Paste Mode">
+      <PanelField label="Paste Mode (voice transcription)">
         <select className={selectClasses} value={draft.pasteMode} onChange={(e) => update('pasteMode', e.target.value)}>
           <option value="clipboard">Clipboard only</option>
           <option value="paste">Auto-paste</option>
         </select>
       </PanelField>
-      <ToggleField label="Press-to-talk" checked={draft.pressToTalk} onChange={(value) => update('pressToTalk', value)} />
-      <ToggleField label="Hold-to-talk" checked={draft.holdToTalk} onChange={(value) => update('holdToTalk', value)} />
-      <ToggleField
-        label="Stop hold-to-talk when modifier releases"
-        checked={draft.holdStopOnModifierRelease}
-        onChange={(value) => update('holdStopOnModifierRelease', value)}
-      />
       <ToggleField label="Show busy cursor during processing" checked={draft.cursorBusy} onChange={(value) => update('cursorBusy', value)} />
     </div>
   );
@@ -374,8 +353,11 @@ export default function SettingsPage() {
       <PanelField label="Assistant Name">
         <input className={inputClasses} value={draft.assistantName} onChange={(e) => update('assistantName', e.target.value)} />
       </PanelField>
-      <PanelField label="LLM Endpoint">
-        <input className={inputClasses} value={draft.llmEndpoint} onChange={(e) => update('llmEndpoint', e.target.value)} />
+      <PanelField label="LLM Host">
+        <div className="space-y-2">
+          <input className={inputClasses} value={draft.llmEndpoint} placeholder="http://localhost:1234" onChange={(e) => update('llmEndpoint', e.target.value)} />
+          <p className="text-xs text-white/60">OpenAI-compatible API host. The app uses `/v1/responses` for requests.</p>
+        </div>
       </PanelField>
       <PanelField label="LLM Model">
         <input className={inputClasses} value={draft.llmModel} onChange={(e) => update('llmModel', e.target.value)} />
@@ -386,57 +368,6 @@ export default function SettingsPage() {
       <PanelField label="System Prompt">
         <textarea className={textAreaClasses} value={draft.llmSystemPrompt} onChange={(e) => update('llmSystemPrompt', e.target.value)} />
       </PanelField>
-    </div>
-  );
-
-  const renderShortcutsTab = () => (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold uppercase tracking-[0.3em] text-white/60">Assistant shortcuts</p>
-        <button
-          type="button"
-          className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white/70 transition hover:border-white/30"
-          onClick={() => update('assistantShortcuts', [...draft.assistantShortcuts, { shortcut: '', prompt: '' }])}
-        >
-          Add shortcut
-        </button>
-      </div>
-      <div className="grid gap-3">
-        {draft.assistantShortcuts.map((entry, index) => (
-          <div key={`shortcut-${index}`} className="space-y-2 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
-            <PanelField label="Shortcut">
-              <input
-                className={inputClasses}
-                value={entry.shortcut}
-                placeholder="CommandOrControl+Alt+P"
-                onChange={(e) => {
-                  const next = [...draft.assistantShortcuts];
-                  next[index] = { ...next[index], shortcut: e.target.value };
-                  update('assistantShortcuts', next);
-                }}
-              />
-            </PanelField>
-            <PanelField label="Prompt">
-              <input
-                className={inputClasses}
-                value={entry.prompt}
-                onChange={(e) => {
-                  const next = [...draft.assistantShortcuts];
-                  next[index] = { ...next[index], prompt: e.target.value };
-                  update('assistantShortcuts', next);
-                }}
-              />
-            </PanelField>
-            <button
-              type="button"
-              className="rounded-full border border-rose-400/70 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-100 transition hover:bg-rose-500/20"
-              onClick={() => update('assistantShortcuts', draft.assistantShortcuts.filter((_, i) => i !== index))}
-            >
-              Remove
-            </button>
-          </div>
-        ))}
-      </div>
     </div>
   );
 
@@ -452,8 +383,6 @@ export default function SettingsPage() {
         return renderAdvancedTab();
       case 'assistant':
         return renderAssistantTab();
-      case 'shortcuts':
-        return renderShortcutsTab();
       default:
         return null;
     }
@@ -480,25 +409,35 @@ export default function SettingsPage() {
       </section>
 
       <section className={panelSurface}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <button
-            type="button"
-            className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30"
-            onClick={resetDefaults}
-          >
-            Reset defaults
-          </button>
-          <div className="flex flex-wrap items-center gap-3">
-            {status === 'saved' && <span className="text-xs uppercase tracking-[0.4em] text-emerald-300">Saved</span>}
-            {status === 'error' && <span className="text-xs uppercase tracking-[0.4em] text-rose-300">Save failed</span>}
+        <div className="space-y-3">
+          {!!validationErrors.length && (
+            <div className="rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-xs text-rose-200">
+              {validationErrors.map((entry, index) => (
+                <p key={`validation-${index}`}>{entry}</p>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <button
               type="button"
-              className="rounded-2xl border border-transparent bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-60"
-              onClick={save}
-              disabled={status === 'saving'}
+              className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30"
+              onClick={resetDefaults}
             >
-              {status === 'saving' ? 'Saving…' : 'Save Settings'}
+              Reset defaults
             </button>
+            <div className="flex flex-wrap items-center gap-3">
+              {status === 'saved' && <span className="text-xs uppercase tracking-[0.4em] text-emerald-300">Saved</span>}
+              {status === 'error' && <span className="text-xs uppercase tracking-[0.4em] text-rose-300">Save failed</span>}
+              <button
+                type="button"
+                className="rounded-2xl border border-transparent bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-60"
+                onClick={save}
+                disabled={status === 'saving'}
+              >
+                {status === 'saving' ? 'Saving…' : 'Save Settings'}
+              </button>
+            </div>
           </div>
         </div>
       </section>

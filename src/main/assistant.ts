@@ -3,6 +3,11 @@ import { config, clipboard, fetchFn } from './ctx.js';
 import { tryPaste, getSelectedText } from './paste.js';
 import { setTrayBusy } from './tray-manager.js';
 import { recordAssistantExchange } from './history-store.js';
+import {
+  extractTextDeltaFromLlmStreamEvent,
+  extractTextFromLlmResponse,
+  resolveLlmEndpoint
+} from './llm-api.js';
 const require = createRequire(import.meta.url);
 
 // Per-session conversation history.
@@ -15,24 +20,42 @@ type AssistantCallOptions = {
 // ── LLM client ────────────────────────────────────────────────────────────────
 export async function callLLM(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
   if (!prompt) return '';
-  const endpoint = config.llmEndpoint;
+  const resolved = resolveLlmEndpoint(String(config?.llmEndpoint || '').trim());
+  const endpoint = resolved.endpoint;
   const model = config.llmModel;
   const key = config.llmApiKey || (process.env as any).OPENAI_API_KEY;
+  if (!endpoint) throw new Error('no LLM endpoint configured');
   if (!key) throw new Error('no LLM API key configured');
 
-  const messages: any[] = [];
-  if (config.llmSystemPrompt) messages.push({ role: 'system', content: config.llmSystemPrompt });
-  for (const m of llmHistory) messages.push(m);
-  messages.push({ role: 'user', content: prompt });
+  const input: any[] = [];
+  for (const message of llmHistory) {
+    input.push({
+      role: message.role,
+      content: [{ type: 'input_text', text: message.content }]
+    });
+  }
+  input.push({
+    role: 'user',
+    content: [{ type: 'input_text', text: prompt }]
+  });
 
-  const body = JSON.stringify({ model, messages, stream: !!onChunk });
+  const payload: any = {
+    model,
+    input,
+    stream: !!onChunk
+  };
+  if (config.llmSystemPrompt) {
+    payload.instructions = config.llmSystemPrompt;
+  }
+
+  const body = JSON.stringify(payload);
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
   const resp = await fetchFn(endpoint, { method: 'POST', headers, body } as any);
   if (!resp.ok) throw new Error(`LLM request failed ${resp.status}: ${await resp.text()}`);
 
   if (!onChunk) {
     const data: any = await resp.json();
-    return data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
+    return extractTextFromLlmResponse(data).trim();
   }
 
   // Streaming response.
@@ -49,11 +72,26 @@ export async function callLLM(prompt: string, onChunk?: (chunk: string) => void)
     for (const line of lines) {
       const t = line.trim();
       if (!t || t === 'data: [DONE]') continue;
-      if (t.startsWith('data: ')) {
+      if (t.startsWith('data:')) {
         try {
-          const data: any = JSON.parse(t.slice(6));
-          const chunk = data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || '';
-          if (chunk) { fullContent += chunk; onChunk(chunk); }
+          const data: any = JSON.parse(t.replace(/^data:\s*/, ''));
+          const chunk = extractTextDeltaFromLlmStreamEvent(data);
+          if (chunk) {
+            fullContent += chunk;
+            onChunk(chunk);
+            continue;
+          }
+
+          if (!fullContent) {
+            const eventType = String(data?.type || '').toLowerCase();
+            if (eventType === 'response.completed' || eventType === 'response.output_text.done') {
+              const finalText = extractTextFromLlmResponse(data?.response || data);
+              if (finalText) {
+                fullContent += finalText;
+                onChunk(finalText);
+              }
+            }
+          }
         } catch (_) {}
       }
     }
@@ -86,7 +124,13 @@ async function finalizePaste(response: string, ctx: { firstChunk: boolean; faile
     const remaining = response.substring(ctx.typed);
     if (remaining) {
       clipboard.writeText(remaining);
-      tryPaste(remaining);
+      const pasteResult = await tryPaste(remaining);
+      if (!pasteResult.ok) {
+        console.warn('[assistant] paste failed, keeping clipboard only', {
+          method: pasteResult.method,
+          reason: pasteResult.reason
+        });
+      }
       setTimeout(() => clipboard.writeText(response), 500);
     }
   }

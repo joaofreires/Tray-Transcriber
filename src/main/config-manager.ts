@@ -1,14 +1,27 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { app } from './ctx.js';
+import { normalizeShortcutConfig } from './shortcuts/schema.js';
+import { DEFAULT_OCR_SETTINGS, normalizeOcrSettings } from './ocr-schema.js';
+import { normalizeLlmHost } from './llm-api.js';
 
 export const defaultConfig = {
-  hotkey: 'CommandOrControl+Shift+Space',
-  holdToTalk: true,
-  holdHotkey: null as any,
   preferKeyHook: true,
-  pressToTalk: true,
-  holdStopOnModifierRelease: false,
+  shortcutsVersion: 2,
+  shortcutDefaults: {
+    assistantInputMode: 'prompt_plus_selection',
+    textOutputMode: 'paste_then_clipboard',
+    ocrProviderId: ''
+  },
+  shortcuts: [
+    {
+      id: 'recording-main',
+      label: 'Recording',
+      enabled: true,
+      shortcut: 'CommandOrControl+Shift+Space',
+      steps: [{ stepType: 'record_hold_to_talk', holdStopOnModifierRelease: false }]
+    }
+  ],
   pasteMode: 'clipboard',
   dictionary: ['OpenAI', 'WhisperX'] as any[],
   includeDictionaryInPrompt: true,
@@ -40,11 +53,11 @@ export const defaultConfig = {
   whisperxArgs: ['-m', 'whisperx', '--device', 'cpu'],
   // assistant / LLM settings
   assistantName: 'Luna',
-  llmEndpoint: 'https://api.openai.com/v1/chat/completions',
+  llmEndpoint: 'https://api.openai.com',
   llmModel: 'gpt-5-nano',
   llmApiKey: '',
   llmSystemPrompt: '',
-  assistantShortcuts: [] as any[],
+  ocr: { ...DEFAULT_OCR_SETTINGS },
   // when true, renderer windows will show a busy (spinner/wait) cursor while the
   // tray icon is in the "busy" state. This mirrors the whisk wheel users expect
   // on macOS/Windows during long operations.
@@ -68,7 +81,20 @@ export function loadConfig(): typeof defaultConfig {
       fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
       return { ...defaultConfig };
     }
-    return { ...defaultConfig, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    const merged = {
+      ...defaultConfig,
+      ...parsed,
+      llmEndpoint: normalizeLlmHost((parsed as any)?.llmEndpoint ?? defaultConfig.llmEndpoint),
+      ocr: normalizeOcrSettings((parsed as any)?.ocr)
+    };
+    const normalized = normalizeShortcutConfig(merged);
+    normalized.normalizedConfig.ocr = normalizeOcrSettings((normalized.normalizedConfig as any).ocr);
+    (normalized.normalizedConfig as any).llmEndpoint = normalizeLlmHost((normalized.normalizedConfig as any).llmEndpoint);
+    if (normalized.migrated || raw.trim() !== JSON.stringify(normalized.normalizedConfig, null, 2)) {
+      fs.writeFileSync(configPath, JSON.stringify(normalized.normalizedConfig, null, 2));
+    }
+    return normalized.normalizedConfig as any;
   } catch (_err) {
     try { fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2)); } catch (_) {}
     return { ...defaultConfig };
@@ -76,5 +102,12 @@ export function loadConfig(): typeof defaultConfig {
 }
 
 export function saveConfig(cfg: any): void {
-  fs.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2));
+  const normalized = normalizeShortcutConfig({
+    ...(cfg || {}),
+    llmEndpoint: normalizeLlmHost(cfg?.llmEndpoint),
+    ocr: normalizeOcrSettings(cfg?.ocr)
+  });
+  normalized.normalizedConfig.ocr = normalizeOcrSettings((normalized.normalizedConfig as any).ocr);
+  (normalized.normalizedConfig as any).llmEndpoint = normalizeLlmHost((normalized.normalizedConfig as any).llmEndpoint);
+  fs.writeFileSync(getConfigPath(), JSON.stringify(normalized.normalizedConfig, null, 2));
 }

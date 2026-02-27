@@ -35,11 +35,14 @@ export let shell: any = null;
 export let systemPreferences: any = null;
 export let dialog: any = null;
 export let webContents: any = null;
+export let desktopCapturer: any = null;
+export let screen: any = null;
 
 export function initElectron(e: {
   app: any; BrowserWindow: any; Tray: any; Menu: any; nativeImage: any;
   globalShortcut: any; ipcMain: any; clipboard: any; shell: any;
   systemPreferences: any; dialog: any; webContents: any;
+  desktopCapturer: any; screen: any;
 }): void {
   app = e.app;
   BrowserWindow = e.BrowserWindow;
@@ -53,6 +56,8 @@ export function initElectron(e: {
   systemPreferences = e.systemPreferences;
   dialog = e.dialog;
   webContents = e.webContents;
+  desktopCapturer = e.desktopCapturer;
+  screen = e.screen;
 }
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
