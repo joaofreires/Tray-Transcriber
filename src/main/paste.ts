@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { config, clipboard } from './ctx.js';
+import { clipboard } from './ctx.js';
 const require = createRequire(import.meta.url);
 
 // ── System-level paste ────────────────────────────────────────────────────────
@@ -142,14 +142,36 @@ async function runSystemAction(method: SystemPasteMethod, action: ActionType): P
   }
 
   if (method === 'wtype') {
-    const key = action === 'paste' ? 'v' : 'c';
-    const result = await runCommand('wtype', ['-M', 'ctrl', key, '-m', 'ctrl']);
+    if (action === 'paste') {
+      const attempts: Array<{ args: string[]; label: string }> = [
+        { args: ['-M', 'ctrl', 'v', '-m', 'ctrl'], label: 'ctrl+v' },
+        { args: ['-M', 'shift', 'insert', '-m', 'shift'], label: 'shift+insert' }
+      ];
+      const reasons: string[] = [];
+      for (const attempt of attempts) {
+        const result = await runCommand('wtype', attempt.args);
+        if (result.ok) return { ok: true, method };
+        reasons.push(`${attempt.label}: ${result.reason || 'unknown error'}`);
+      }
+      return { ok: false, method, reason: reasons.join('; ') };
+    }
+    const result = await runCommand('wtype', ['-M', 'ctrl', 'c', '-m', 'ctrl']);
     if (!result.ok) return { ok: false, method, reason: result.reason };
     return { ok: true, method };
   }
 
-  const combo = action === 'paste' ? 'ctrl+v' : 'ctrl+c';
-  const result = await runCommand('xdotool', ['key', '--clearmodifiers', combo]);
+  if (action === 'paste') {
+    const attempts = ['ctrl+v', 'shift+Insert'];
+    const reasons: string[] = [];
+    for (const combo of attempts) {
+      const result = await runCommand('xdotool', ['key', '--clearmodifiers', combo]);
+      if (result.ok) return { ok: true, method };
+      reasons.push(`${combo}: ${result.reason || 'unknown error'}`);
+    }
+    return { ok: false, method, reason: reasons.join('; ') };
+  }
+
+  const result = await runCommand('xdotool', ['key', '--clearmodifiers', 'ctrl+c']);
   if (!result.ok) return { ok: false, method, reason: result.reason };
   return { ok: true, method };
 }
@@ -207,8 +229,13 @@ type TryPasteOptions = {
 export async function tryPaste(text: string, options?: TryPasteOptions): Promise<PasteResult> {
   const safeText = String(text || '');
   clipboard.writeText(safeText);
-  if (!options?.force && config?.pasteMode !== 'paste') {
-    return { ok: false, reason: 'paste mode is not enabled' };
+  if (process.platform === 'linux') {
+    try {
+      // Keep PRIMARY selection in sync so Shift+Insert fallback pastes the same text.
+      clipboard.writeText(safeText, 'selection');
+    } catch (_err) {
+      // Ignore unsupported selection clipboard backends.
+    }
   }
 
   const settleDelayMs = Number.isFinite(options?.settleDelayMs) ? Math.max(0, Number(options?.settleDelayMs)) : 60;

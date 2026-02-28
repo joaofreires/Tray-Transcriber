@@ -14,7 +14,10 @@ const {
 }));
 
 vi.mock('node:child_process', () => ({
-  spawn: spawnMock
+  spawn: spawnMock,
+  default: {
+    spawn: spawnMock
+  }
 }));
 
 vi.mock('../ctx.js', () => ({
@@ -120,5 +123,69 @@ describe('paste backend routing', () => {
     expect(result.ok).toBe(false);
     expect(result.reason || '').toContain('wtype not found');
     expect(spawnMock.mock.calls.some(([cmd]) => cmd === 'xdotool')).toBe(false);
+  });
+
+  it('falls back from xdotool ctrl+v to shift+Insert', async () => {
+    process.env.XDG_SESSION_TYPE = 'x11';
+    process.env.DISPLAY = ':1';
+    delete process.env.WAYLAND_DISPLAY;
+
+    let xdotoolCalls = 0;
+    spawnMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'which' && args[0] === 'xdotool') return spawnProcess(0, '/usr/bin/xdotool\n');
+      if (cmd === 'xdotool') {
+        xdotoolCalls += 1;
+        if (xdotoolCalls === 1) return spawnProcess(1, '', 'ctrl+v blocked');
+        return spawnProcess(0);
+      }
+      return spawnProcess(1, '', 'not found');
+    });
+
+    const { tryPasteViaSystem } = await import('../paste.js');
+    const result = await tryPasteViaSystem();
+
+    expect(result).toEqual({ ok: true, method: 'xdotool' });
+    const xdotoolInvocationArgs = spawnMock.mock.calls
+      .filter(([cmd]) => cmd === 'xdotool')
+      .map(([, args]) => String((args as string[]).join(' ')));
+    expect(xdotoolInvocationArgs.some((args) => args.includes('ctrl+v'))).toBe(true);
+    expect(xdotoolInvocationArgs.some((args) => args.includes('shift+Insert'))).toBe(true);
+  });
+
+  it('attempts paste even when global pasteMode is clipboard', async () => {
+    process.env.XDG_SESSION_TYPE = 'x11';
+    process.env.DISPLAY = ':1';
+    configRef.pasteMode = 'clipboard';
+
+    spawnMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'which' && args[0] === 'xdotool') return spawnProcess(0, '/usr/bin/xdotool\n');
+      if (cmd === 'xdotool') return spawnProcess(0);
+      return spawnProcess(1, '', 'not found');
+    });
+
+    const { tryPaste } = await import('../paste.js');
+    const result = await tryPaste('hello world');
+
+    expect(result.ok).toBe(true);
+    expect(result.method).toBe('xdotool');
+    expect(writeTextMock).toHaveBeenCalledWith('hello world');
+  });
+
+  it('syncs linux selection clipboard before paste', async () => {
+    process.env.XDG_SESSION_TYPE = 'x11';
+    process.env.DISPLAY = ':1';
+    delete process.env.WAYLAND_DISPLAY;
+
+    spawnMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'which' && args[0] === 'xdotool') return spawnProcess(0, '/usr/bin/xdotool\n');
+      if (cmd === 'xdotool') return spawnProcess(0);
+      return spawnProcess(1, '', 'not found');
+    });
+
+    const { tryPaste } = await import('../paste.js');
+    await tryPaste('selection-sync');
+
+    expect(writeTextMock).toHaveBeenCalledWith('selection-sync');
+    expect(writeTextMock).toHaveBeenCalledWith('selection-sync', 'selection');
   });
 });

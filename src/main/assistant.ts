@@ -1,13 +1,9 @@
 import { createRequire } from 'node:module';
-import { config, clipboard, fetchFn } from './ctx.js';
+import { config, clipboard } from './ctx.js';
 import { tryPaste, getSelectedText } from './paste.js';
 import { setTrayBusy } from './tray-manager.js';
 import { recordAssistantExchange } from './history-store.js';
-import {
-  extractTextDeltaFromLlmStreamEvent,
-  extractTextFromLlmResponse,
-  resolveLlmEndpoint
-} from './llm-api.js';
+import { getRuntimeOrchestrator } from './runtime/runtime-services.js';
 const require = createRequire(import.meta.url);
 
 // Per-session conversation history.
@@ -17,86 +13,31 @@ type AssistantCallOptions = {
   metadata?: Record<string, unknown>;
 };
 
+function resolveAssistantName(): string {
+  try {
+    const runtime = getRuntimeOrchestrator();
+    const active = runtime.getActiveProviderProfile('llm');
+    const fromProfile = String(active.profile?.options?.assistantName || '').trim();
+    if (fromProfile) return fromProfile;
+  } catch {}
+  return String(config?.assistantName || '').trim();
+}
+
 // ── LLM client ────────────────────────────────────────────────────────────────
 export async function callLLM(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
   if (!prompt) return '';
-  const resolved = resolveLlmEndpoint(String(config?.llmEndpoint || '').trim());
-  const endpoint = resolved.endpoint;
-  const model = config.llmModel;
-  const key = config.llmApiKey || (process.env as any).OPENAI_API_KEY;
-  if (!endpoint) throw new Error('no LLM endpoint configured');
-  if (!key) throw new Error('no LLM API key configured');
+  const runtime = getRuntimeOrchestrator();
+  const messages = llmHistory.map((message) => ({
+    role: message.role as 'user' | 'assistant',
+    content: message.content
+  }));
+  messages.push({ role: 'user', content: prompt });
 
-  const input: any[] = [];
-  for (const message of llmHistory) {
-    input.push({
-      role: message.role,
-      content: [{ type: 'input_text', text: message.content }]
-    });
-  }
-  input.push({
-    role: 'user',
-    content: [{ type: 'input_text', text: prompt }]
+  return runtime.respondLlm({
+    messages: messages as any,
+    stream: !!onChunk,
+    onChunk
   });
-
-  const payload: any = {
-    model,
-    input,
-    stream: !!onChunk
-  };
-  if (config.llmSystemPrompt) {
-    payload.instructions = config.llmSystemPrompt;
-  }
-
-  const body = JSON.stringify(payload);
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
-  const resp = await fetchFn(endpoint, { method: 'POST', headers, body } as any);
-  if (!resp.ok) throw new Error(`LLM request failed ${resp.status}: ${await resp.text()}`);
-
-  if (!onChunk) {
-    const data: any = await resp.json();
-    return extractTextFromLlmResponse(data).trim();
-  }
-
-  // Streaming response.
-  const reader = (resp.body as any).getReader();
-  const decoder = new TextDecoder('utf-8');
-  let fullContent = '';
-  let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t || t === 'data: [DONE]') continue;
-      if (t.startsWith('data:')) {
-        try {
-          const data: any = JSON.parse(t.replace(/^data:\s*/, ''));
-          const chunk = extractTextDeltaFromLlmStreamEvent(data);
-          if (chunk) {
-            fullContent += chunk;
-            onChunk(chunk);
-            continue;
-          }
-
-          if (!fullContent) {
-            const eventType = String(data?.type || '').toLowerCase();
-            if (eventType === 'response.completed' || eventType === 'response.output_text.done') {
-              const finalText = extractTextFromLlmResponse(data?.response || data);
-              if (finalText) {
-                fullContent += finalText;
-                onChunk(finalText);
-              }
-            }
-          }
-        } catch (_) {}
-      }
-    }
-  }
-  return fullContent;
 }
 
 function recordHistory(prompt: string, response: string): void {
@@ -138,14 +79,14 @@ async function finalizePaste(response: string, ctx: { firstChunk: boolean; faile
 
 // ── Assistant dispatch ────────────────────────────────────────────────────────
 export function shouldHandleAsAssistant(text: string): boolean {
-  const name = config?.assistantName?.trim();
+  const name = resolveAssistantName();
   if (!text || !name) return false;
   return new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(text.trim());
 }
 
 export async function handleAssistant(text: string, opts?: AssistantCallOptions): Promise<string | null> {
   if (!shouldHandleAsAssistant(text)) return null;
-  const name = config.assistantName.trim();
+  const name = resolveAssistantName();
   const remainder = text.trim().replace(new RegExp('^' + name, 'i'), '').trim();
   const selection = await getSelectedText();
   const prompt = selection ? (remainder ? `${remainder}\n\n${selection}` : selection) : remainder;

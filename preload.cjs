@@ -16,6 +16,25 @@ contextBridge.exposeInMainWorld('trayTranscriber', {
   updateTrayIcon: () => ipcRenderer.send('ui-update-tray-icon'),
   updateConfig: (config) => ipcRenderer.invoke('config-save', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
+  onConfigChanged: (cb) => {
+    const handler = (_event, payload) => cb(payload);
+    ipcRenderer.on('config-changed', handler);
+    return () => ipcRenderer.removeListener('config-changed', handler);
+  },
+  listProviders: () => ipcRenderer.invoke('providers-list'),
+  getProviderStatus: (providerId) => ipcRenderer.invoke('provider-status', providerId),
+  selectProvider: (payload) => ipcRenderer.invoke('provider-select', payload),
+  upsertProviderProfile: (payload) => ipcRenderer.invoke('provider-upsert-profile', payload),
+  installStart: (payload) => ipcRenderer.invoke('install-start', payload),
+  installCancel: (jobId) => ipcRenderer.invoke('install-cancel', jobId),
+  installListJobs: () => ipcRenderer.invoke('install-list-jobs'),
+  installCheckUpdates: () => ipcRenderer.invoke('install-check-updates'),
+  setSecret: (payload) => ipcRenderer.invoke('secret-set', payload),
+  deleteSecret: (ref) => ipcRenderer.invoke('secret-delete', ref),
+  getRuntimeApiInfo: () => ipcRenderer.invoke('runtime-api-info'),
+  verifyRuntimeApi: () => ipcRenderer.invoke('verify-runtime-api'),
+  verifyProvider: (capability) => ipcRenderer.invoke('verify-provider', capability),
+  openExternalUrl: (url) => ipcRenderer.invoke('open-external-url', url),
   onCursorBusy: (cb) => {
     const handler = (_event, flag) => cb(flag);
     ipcRenderer.on('cursor-busy', handler);

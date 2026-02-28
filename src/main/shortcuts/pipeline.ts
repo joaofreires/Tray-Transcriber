@@ -3,12 +3,8 @@ import { callLLM } from '../assistant.js';
 import { getSelectedText, tryPaste } from '../paste.js';
 import { recordAssistantExchange } from '../history-store.js';
 import type { ShortcutDefinition, ShortcutStep, ShortcutDefaults } from './schema.js';
-import {
-  OcrProviderExecutionError,
-  type OcrProviderExecutionErrorCode
-} from './ocr-provider-types.js';
-import { resolveOcrProvider, type OcrProviderResolutionResult } from './ocr-providers.js';
 import { captureScreenshot, ScreenshotCaptureError } from './screenshot.js';
+import { getRuntimeOrchestrator } from '../runtime/runtime-services.js';
 
 export type ShortcutExecutionContext = {
   capturedImage?: Buffer;
@@ -37,12 +33,6 @@ export type ShortcutRuntimeError = {
 
 function asRuntimeError(code: ShortcutRuntimeError['code'], message: string, shortcutId?: string, stepType?: string): ShortcutRuntimeError {
   return { code, message, shortcutId, stepType };
-}
-
-function asProviderRuntimeCode(code: OcrProviderExecutionErrorCode): ShortcutRuntimeError['code'] {
-  if (code === 'OCR_CLI_UNAVAILABLE') return 'OCR_CLI_UNAVAILABLE';
-  if (code === 'OCR_CLI_EXEC_FAILED') return 'OCR_CLI_EXEC_FAILED';
-  return 'OCR_VISION_REQUEST_FAILED';
 }
 
 function resolveAssistantInputMode(step: Extract<ShortcutStep, { stepType: 'assistant_prompt' }>, defaults: ShortcutDefaults): 'prompt_plus_selection' | 'prompt_only' {
@@ -166,37 +156,25 @@ async function executeOcrStep(
     throw asRuntimeError('OCR_MISSING_CAPTURE', 'ocr_extract requires capturedImage in context.', shortcutId, step.stepType);
   }
 
-  const requestedProviderId = (step.providerId || defaults.ocrProviderId || '').trim().toLowerCase();
-  const providerResolution: OcrProviderResolutionResult = resolveOcrProvider(requestedProviderId);
-  if (!providerResolution.ok) {
-    const failure = providerResolution as Extract<OcrProviderResolutionResult, { ok: false }>;
-    throw asRuntimeError(failure.code, failure.message, shortcutId, step.stepType);
-  }
-  const resolvedProvider = providerResolution as Extract<OcrProviderResolutionResult, { ok: true }>;
-
   try {
     const startedAt = Date.now();
-    context.extractedText = (await resolvedProvider.provider.extractText(
-      context.capturedImage,
-      { providerId: resolvedProvider.providerId, languageHint: step.languageHint },
-      context
-    )).trim();
+    const runtime = getRuntimeOrchestrator();
+    const requestedProviderId = (step.providerId || defaults.ocrProviderId || '').trim().toLowerCase();
+    if (requestedProviderId) {
+      runtime.setActiveProvider('ocr', requestedProviderId);
+    }
+    context.extractedText = (await runtime.extractOcr({
+      image: context.capturedImage,
+      languageHint: step.languageHint
+    })).trim();
 
     console.log('[shortcuts] ocr extracted text', {
       shortcutId,
-      providerId: resolvedProvider.providerId,
-      mode: resolvedProvider.activeMode,
+      providerId: requestedProviderId || 'active',
       textLength: context.extractedText.length,
       elapsedMs: Date.now() - startedAt
     });
   } catch (err: any) {
-    if (err instanceof OcrProviderExecutionError) {
-      throw asRuntimeError(asProviderRuntimeCode(err.code), err.message, shortcutId, step.stepType);
-    }
-    const code = err?.code as ShortcutRuntimeError['code'];
-    if (code === 'OCR_VISION_REQUEST_FAILED' || code === 'OCR_CLI_UNAVAILABLE' || code === 'OCR_CLI_EXEC_FAILED') {
-      throw asRuntimeError(code, String(err?.message || err), shortcutId, step.stepType);
-    }
     throw asRuntimeError('OCR_CLI_EXEC_FAILED', `OCR execution failed: ${err?.message || String(err)}`, shortcutId, step.stepType);
   }
 }

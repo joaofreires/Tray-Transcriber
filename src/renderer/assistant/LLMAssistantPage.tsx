@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useConfigSync } from '../hooks/useConfigSync';
 
 type OcrMode = 'llm_vision' | 'local_tesseract';
 
@@ -110,6 +111,13 @@ export default function LLMAssistantPage() {
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const { hasExternalUpdate, reloadFromLatest, dismissExternalUpdate } = useConfigSync({
+    baseConfig,
+    draft,
+    setBaseConfig,
+    setDraft,
+    normalizeDraft: normalizeConfig
+  });
 
   useEffect(() => {
     (async () => {
@@ -132,17 +140,22 @@ export default function LLMAssistantPage() {
   const save = async () => {
     if (!draft) return;
     setStatus('saving');
+    setError(null);
     setValidationErrors([]);
 
     try {
-      const result = (await window.trayTranscriber?.updateConfig?.({
+      const llmEndpoint = normalizeLlmHostInput(draft.llmEndpoint);
+      const nextBase = {
         ...(baseConfig ?? {}),
         assistantName: draft.assistantName,
-        llmEndpoint: normalizeLlmHostInput(draft.llmEndpoint),
+        llmEndpoint,
         llmModel: draft.llmModel,
         llmApiKey: draft.llmApiKey,
         llmSystemPrompt: draft.llmSystemPrompt,
         ocr: draft.ocr
+      };
+      const result = (await window.trayTranscriber?.updateConfig?.({
+        ...nextBase
       })) as SaveConfigResult | undefined;
 
       if (!result || !result.ok) {
@@ -152,6 +165,8 @@ export default function LLMAssistantPage() {
         return;
       }
 
+      setBaseConfig(nextBase);
+      setDraft(normalizeConfig(nextBase));
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 1400);
     } catch (err) {
@@ -169,6 +184,20 @@ export default function LLMAssistantPage() {
 
   return (
     <div className="space-y-6 text-white">
+      {hasExternalUpdate ? (
+        <section className="rounded-2xl border border-sky-300/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+          <p>Configuration changed elsewhere. Keep edits or reload latest.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button className="rounded-xl border border-sky-200/40 px-3 py-1 text-xs hover:bg-sky-300/20" onClick={reloadFromLatest}>
+              Reload latest
+            </button>
+            <button className="rounded-xl border border-white/20 px-3 py-1 text-xs hover:bg-white/10" onClick={dismissExternalUpdate}>
+              Dismiss
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <section className={panelSurface}>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <PanelField label="Assistant Name">
@@ -329,11 +358,6 @@ export default function LLMAssistantPage() {
             </>
           )}
         </div>
-      </section>
-
-      <section className={panelSurface}>
-        <p className="text-xs uppercase tracking-[0.3em] text-white/60">Shortcuts moved</p>
-        <p className="mt-2 text-sm text-white/70">Shortcut definitions are now centralized in Sidebar → Shortcuts, including pipeline steps and OCR-enabled actions.</p>
       </section>
 
       <section className={panelSurface}>

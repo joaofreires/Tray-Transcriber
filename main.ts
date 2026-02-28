@@ -4,26 +4,48 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
+import { execFileSync } from 'node:child_process';
 
 import {
-  initElectron, setAPP_ROOT, setMainDirname, setConfig, setFetch,
+  initElectron, setAPP_ROOT, setMainDirname, setConfig, setFetch, APP_ROOT,
   config, ipcMain, clipboard, webContents, app, Menu, Tray, nativeImage, globalShortcut, shell, dialog
 } from './src/main/ctx.js';
 import { getMainState, setMainState } from './src/store/main-store.js';
 import { loadConfig, saveConfig, getConfigPath } from './src/main/config-manager.js';
 import { createLogger, installConsoleLogger } from './src/main/logger.js';
 import { buildTrayIcon, updateTrayIcon, setTrayBusy, loadBusyFrames } from './src/main/tray-manager.js';
-import { createWindow, createConfigWindow, reloadAllWindows } from './src/main/windows.js';
+import { createWindow, createConfigWindow } from './src/main/windows.js';
 import { initHotkeys } from './src/main/hotkeys.js';
-import { ensureWorker, warmupWorker, restartWorker, runWhisperX, fetchWorkerStatus, killWorker } from './src/main/worker-manager.js';
+import { ensureWorker, warmupWorker, restartWorker, fetchWorkerStatus, killWorker } from './src/main/worker-manager.js';
 import { handleAssistant } from './src/main/assistant.js';
 import { tryPaste } from './src/main/paste.js';
 import { normalizeTranscript } from './src/main/transcript.js';
+import { resolveRecordingOutputMode } from './src/main/recording-output-policy.js';
 import { registerShortcutHandlers } from './src/main/shortcuts/registry.js';
 import { normalizeShortcutConfig } from './src/main/shortcuts/schema.js';
-import { normalizeOcrSettings } from './src/main/ocr-schema.js';
-import { normalizeLlmHost } from './src/main/llm-api.js';
+import {
+  broadcastConfigChanged,
+  getChangedConfigPaths,
+  isShortcutOnlyUpdate,
+  shouldRestartWorkerForConfigChanges
+} from './src/main/config-sync.js';
+import {
+  configureRuntimeServices,
+  getRuntimeOrchestrator,
+  getInstallerService,
+  getSecretsService,
+  getRuntimeApiServer,
+  normalizeConfigForRuntime,
+  shutdownRuntimeServices
+} from './src/main/runtime/runtime-services.js';
+import {
+  buildGithubIssueUrl,
+  parseGitHubRemoteToRepoBase,
+  verifyLlmProvider,
+  verifyOcrProvider,
+  verifyRuntimeApiAlive,
+  type VerificationResult
+} from './src/main/runtime/verification.js';
 import {
   initHistoryStore,
   recordTranscriptEntry,
@@ -112,7 +134,8 @@ async function processTranscribeQueue(): Promise<void> {
   setTrayBusy(true);
   try {
     console.log('[transcribe] start', { audioPath: next.audioPath, pending: transcribeQueue.length });
-    const text = normalizeTranscript(await runWhisperX(next.audioPath));
+    const runtime = getRuntimeOrchestrator();
+    const text = normalizeTranscript(await runtime.transcribeFromFile(next.audioPath, path.extname(next.audioPath) || '.webm'));
     console.log('[transcript] len=%d preview=%s', text.length, text.slice(0, 120));
     if (text) {
       try {
@@ -147,12 +170,17 @@ async function processTranscribeQueue(): Promise<void> {
         }
       });
       if (!assistantResponse) {
-        const pasteResult = await tryPaste(text);
-        if (!pasteResult.ok) {
-          console.warn('[transcribe] auto-paste failed, keeping clipboard only', {
-            method: pasteResult.method,
-            reason: pasteResult.reason
-          });
+        const outputMode = resolveRecordingOutputMode(config);
+        if (outputMode === 'paste_then_clipboard') {
+          const pasteResult = await tryPaste(text, { force: true });
+          if (!pasteResult.ok) {
+            console.warn('[transcribe] auto-paste failed, keeping clipboard only', {
+              method: pasteResult.method,
+              reason: pasteResult.reason
+            });
+            clipboard.writeText(text);
+          }
+        } else {
           clipboard.writeText(text);
         }
       }
@@ -234,21 +262,13 @@ type SaveConfigResult =
   | { ok: true; warnings?: SaveConfigWarning[] }
   | { ok: false; code: string; errors: any[] };
 
-const HOT_RELOAD_SAFE_CONFIG_KEYS = new Set(['shortcutsVersion', 'shortcutDefaults', 'shortcuts', 'ocr']);
-
-function getChangedConfigKeys(prevConfig: Record<string, unknown>, nextConfig: Record<string, unknown>): string[] {
-  const keys = new Set<string>([...Object.keys(prevConfig || {}), ...Object.keys(nextConfig || {})]);
-  const changed: string[] = [];
-  for (const key of keys) {
-    if (!isDeepStrictEqual(prevConfig?.[key], nextConfig?.[key])) {
-      changed.push(key);
-    }
-  }
-  return changed;
-}
-
-function isShortcutOnlyUpdate(changedKeys: string[]): boolean {
-  return changedKeys.length > 0 && changedKeys.every((key) => HOT_RELOAD_SAFE_CONFIG_KEYS.has(key));
+function broadcastConfigChangedToRenderers(payload: {
+  changedKeys: string[];
+  config: Record<string, unknown>;
+  sourceWindowType?: 'main' | 'config' | 'unknown';
+}): void {
+  const { win, configWin } = getMainState();
+  broadcastConfigChanged([win as any, configWin as any], payload);
 }
 
 function notifyCursorBusyState(): void {
@@ -269,16 +289,108 @@ function toSaveWarning(issue: { code: string; message: string; shortcutId?: stri
   };
 }
 
-function applyRuntimeConfigUpdate(newConfig: any): SaveConfigResult {
-  const previousConfig = { ...(config || {}) };
-  const merged = {
-    ...(config || {}),
-    ...(newConfig || {}),
-    llmEndpoint: normalizeLlmHost(newConfig?.llmEndpoint ?? config?.llmEndpoint),
-    ocr: normalizeOcrSettings(newConfig?.ocr ?? config?.ocr)
+let githubIssueRepoBaseCache: string | null | undefined;
+
+function getRuntimeApiInfoPayload() {
+  const apiConfig = config?.runtimeApi || {};
+  let token = '';
+  try {
+    token = getRuntimeApiServer().getToken();
+  } catch {}
+  return {
+    enabled: !!apiConfig.enabled,
+    transport: apiConfig.transport === 'socket' ? 'socket' : 'tcp',
+    host: String(apiConfig.host || '127.0.0.1'),
+    port: Number(apiConfig.port || 0),
+    socketPath: String(apiConfig.socketPath || ''),
+    authRequired: !!apiConfig.authRequired,
+    token
+  } as const;
+}
+
+function getGitHubIssueRepoBase(): string | null {
+  if (githubIssueRepoBaseCache !== undefined) return githubIssueRepoBaseCache;
+
+  const envRepository = String(process.env.GITHUB_REPOSITORY || '').trim();
+  if (envRepository) {
+    githubIssueRepoBaseCache = parseGitHubRemoteToRepoBase(`https://github.com/${envRepository}`);
+    return githubIssueRepoBaseCache;
+  }
+
+  const envRepositoryUrl = String(process.env.GITHUB_REPOSITORY_URL || '').trim();
+  if (envRepositoryUrl) {
+    githubIssueRepoBaseCache = parseGitHubRemoteToRepoBase(envRepositoryUrl);
+    return githubIssueRepoBaseCache;
+  }
+
+  try {
+    const originUrl = String(
+      execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+        cwd: APP_ROOT || process.cwd(),
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf8'
+      }) || ''
+    ).trim();
+    githubIssueRepoBaseCache = parseGitHubRemoteToRepoBase(originUrl);
+    return githubIssueRepoBaseCache;
+  } catch {
+    githubIssueRepoBaseCache = null;
+    return null;
+  }
+}
+
+function withVerificationIssueUrl(result: VerificationResult): VerificationResult {
+  if (result.ok) return result;
+
+  const runtimeApiConfig = config?.runtimeApi || {};
+  const issueContext = {
+    timestamp: new Date().toISOString(),
+    target: result.target,
+    activeProviders: {
+      stt: config?.providers?.stt?.activeProviderId || '',
+      llm: config?.providers?.llm?.activeProviderId || '',
+      ocr: config?.providers?.ocr?.activeProviderId || ''
+    },
+    runtimeApi: {
+      enabled: !!runtimeApiConfig.enabled,
+      transport: runtimeApiConfig.transport || 'tcp',
+      host: runtimeApiConfig.host || '127.0.0.1',
+      port: Number(runtimeApiConfig.port || 0),
+      socketPath: String(runtimeApiConfig.socketPath || ''),
+      authRequired: !!runtimeApiConfig.authRequired
+    }
   };
+
+  const issueTitle = `[Verification] ${result.target} check failed`;
+  const issueBody = [
+    '### Verification failure',
+    '',
+    `- Target: ${result.target}`,
+    `- Message: ${result.message}`,
+    `- Error: ${result.error || 'Unknown error'}`,
+    result.details ? `- Details: ${result.details}` : '',
+    '',
+    '### Context',
+    '```json',
+    JSON.stringify(issueContext, null, 2),
+    '```'
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return {
+    ...result,
+    issueUrl: buildGithubIssueUrl(getGitHubIssueRepoBase(), issueTitle, issueBody)
+  };
+}
+
+function applyRuntimeConfigUpdate(
+  newConfig: any,
+  sourceWindowType: 'main' | 'config' | 'unknown' = 'unknown'
+): SaveConfigResult {
+  const previousConfig = { ...(config || {}) };
+  const merged = { ...(config || {}), ...(newConfig || {}) };
   const normalized = normalizeShortcutConfig(merged);
-  normalized.normalizedConfig.ocr = normalizeOcrSettings((normalized.normalizedConfig as any).ocr);
   if (!normalized.validation.ok) {
     return {
       ok: false,
@@ -287,8 +399,18 @@ function applyRuntimeConfigUpdate(newConfig: any): SaveConfigResult {
     };
   }
 
-  const nextConfig = normalized.normalizedConfig;
-  const changedKeys = getChangedConfigKeys(previousConfig as Record<string, unknown>, nextConfig as Record<string, unknown>);
+  const nextConfig = normalized.normalizedConfig as any;
+  const runtimeNormalized = normalizeConfigForRuntime(nextConfig);
+  nextConfig.configVersion = 3;
+  nextConfig.providers = runtimeNormalized.providers;
+  nextConfig.installer = runtimeNormalized.installer;
+  nextConfig.runtimeApi = runtimeNormalized.runtimeApi;
+  nextConfig.secrets = runtimeNormalized.secrets;
+  nextConfig.runtimeNotice = runtimeNormalized.runtimeNotice;
+  const changedKeys = getChangedConfigPaths(
+    previousConfig as Record<string, unknown>,
+    nextConfig as Record<string, unknown>
+  );
   const shortcutOnlyUpdate = isShortcutOnlyUpdate(changedKeys);
 
   for (const key of Object.keys(config || {})) {
@@ -296,27 +418,34 @@ function applyRuntimeConfigUpdate(newConfig: any): SaveConfigResult {
   }
   Object.assign(config, nextConfig);
   saveConfig(config);
+  void configureRuntimeServices(config);
   const log = createLogger();
   installConsoleLogger(log);
   const shortcutRegistrationReport = registerShortcutHandlers(config as any);
   updateTrayMenu();
-  if (!shortcutOnlyUpdate && changedKeys.length > 0) {
+  if (changedKeys.length > 0 && shouldRestartWorkerForConfigChanges(changedKeys)) {
     restartWorker();
-    reloadAllWindows();
   } else if (shortcutOnlyUpdate) {
     console.log('[config] applied hot-reload-safe update without window reload');
+  }
+  if (changedKeys.length > 0) {
+    broadcastConfigChangedToRenderers({
+      changedKeys,
+      config: { ...(config as any) },
+      sourceWindowType
+    });
   }
   notifyCursorBusyState();
   const warnings = shortcutRegistrationReport.issues.map(toSaveWarning);
   return warnings.length ? { ok: true, warnings } : { ok: true };
 }
 
-ipcMain.handle('config-save', async (_event: any, newConfig: any) => {
-  return applyRuntimeConfigUpdate(newConfig);
+ipcMain.handle('config-save', async (event: any, newConfig: any) => {
+  return applyRuntimeConfigUpdate(newConfig, determineWindowType(event?.sender));
 });
 
-ipcMain.on('config-updated', (_event: any, newConfig: any) => {
-  const result = applyRuntimeConfigUpdate(newConfig);
+ipcMain.on('config-updated', (event: any, newConfig: any) => {
+  const result = applyRuntimeConfigUpdate(newConfig, determineWindowType(event?.sender));
   if (!result.ok) {
     console.error('[config] rejected legacy config-updated payload', (result as any).errors || []);
     return;
@@ -327,6 +456,118 @@ ipcMain.on('config-updated', (_event: any, newConfig: any) => {
 });
 
 ipcMain.handle('get-config', () => ({ ...config }));
+
+ipcMain.handle('providers-list', async () => {
+  return getRuntimeOrchestrator().listProviders();
+});
+
+ipcMain.handle('provider-status', async (_event, providerId: string) => {
+  return getRuntimeOrchestrator().providerStatus(String(providerId || '').trim());
+});
+
+ipcMain.handle('provider-select', async (event, payload: any) => {
+  const capability = String(payload?.capability || '').trim();
+  const providerId = String(payload?.providerId || '').trim();
+  const profileId = payload?.profileId ? String(payload.profileId).trim() : undefined;
+  if (!capability || !providerId) {
+    return { ok: false, code: 'VALIDATION_FAILED', errors: [{ code: 'MISSING_INPUT', message: 'capability and providerId are required' }] };
+  }
+  const next = JSON.parse(JSON.stringify(config || {}));
+  if (!next.providers?.[capability]) {
+    return { ok: false, code: 'VALIDATION_FAILED', errors: [{ code: 'INVALID_CAPABILITY', message: `Unknown capability: ${capability}` }] };
+  }
+  next.providers[capability].activeProviderId = providerId;
+  if (profileId) next.providers[capability].activeProfileId = profileId;
+  return applyRuntimeConfigUpdate(next, determineWindowType(event?.sender));
+});
+
+ipcMain.handle('provider-upsert-profile', async (event, payload: any) => {
+  const capability = String(payload?.capability || '').trim();
+  const profile = payload?.profile;
+  if (!capability || !profile || typeof profile !== 'object') {
+    return { ok: false, code: 'VALIDATION_FAILED', errors: [{ code: 'MISSING_INPUT', message: 'capability and profile are required' }] };
+  }
+  const next = JSON.parse(JSON.stringify(config || {}));
+  if (!next.providers?.[capability]) {
+    return { ok: false, code: 'VALIDATION_FAILED', errors: [{ code: 'INVALID_CAPABILITY', message: `Unknown capability: ${capability}` }] };
+  }
+  const profiles = Array.isArray(next.providers[capability].profiles) ? next.providers[capability].profiles : [];
+  const idx = profiles.findIndex((entry: any) => String(entry?.id || '') === String(profile.id || ''));
+  if (idx >= 0) profiles[idx] = profile;
+  else profiles.push(profile);
+  next.providers[capability].profiles = profiles;
+  return applyRuntimeConfigUpdate(next, determineWindowType(event?.sender));
+});
+
+ipcMain.handle('install-start', async (_event, payload: any) => {
+  const installer = getInstallerService();
+  return installer.startJob({
+    providerId: String(payload?.providerId || '').trim(),
+    action: String(payload?.action || 'install') as any,
+    localPath: payload?.localPath ? String(payload.localPath) : undefined
+  });
+});
+
+ipcMain.handle('install-cancel', async (_event, jobId: string) => {
+  return getInstallerService().cancelJob(String(jobId || '').trim());
+});
+
+ipcMain.handle('install-list-jobs', async () => {
+  return getInstallerService().listJobs();
+});
+
+ipcMain.handle('install-check-updates', async () => {
+  return getInstallerService().checkForUpdates();
+});
+
+ipcMain.handle('secret-set', async (_event, payload: any) => {
+  const ref = String(payload?.ref || '').trim();
+  const value = String(payload?.value || '');
+  return getSecretsService().setSecret(ref, value);
+});
+
+ipcMain.handle('secret-delete', async (_event, ref: string) => {
+  return getSecretsService().deleteSecret(String(ref || '').trim());
+});
+
+ipcMain.handle('runtime-api-info', async () => {
+  return getRuntimeApiInfoPayload();
+});
+
+ipcMain.handle('verify-runtime-api', async () => {
+  const result = await verifyRuntimeApiAlive(getRuntimeApiInfoPayload());
+  return withVerificationIssueUrl(result);
+});
+
+ipcMain.handle('verify-provider', async (_event, capability: string) => {
+  const normalizedCapability = String(capability || '').trim();
+  if (normalizedCapability !== 'llm' && normalizedCapability !== 'ocr') {
+    return withVerificationIssueUrl({
+      ok: false,
+      target: 'llm',
+      message: 'Unsupported verification capability.',
+      error: `Expected "llm" or "ocr", got "${normalizedCapability || '<empty>'}"`,
+      details: 'Renderer sent an invalid verification capability.'
+    });
+  }
+
+  const runtime = getRuntimeOrchestrator();
+  const result = normalizedCapability === 'llm'
+    ? await verifyLlmProvider(runtime)
+    : await verifyOcrProvider(runtime);
+  return withVerificationIssueUrl(result);
+});
+
+ipcMain.handle('open-external-url', async (_event, rawUrl: string) => {
+  const url = String(rawUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch {
+    return false;
+  }
+});
 
 ipcMain.handle('history-get-summaries', async (_event, opts: any) => {
   return getHistorySummaries(opts ?? {});
@@ -384,6 +625,8 @@ ipcMain.handle('history-export-entry', async (_event, opts: any) => {
 app.whenReady().then(async () => {
   const cfg = loadConfig();
   setConfig(cfg);
+  const normalizedRuntimeConfig = await configureRuntimeServices(cfg);
+  Object.assign(cfg, normalizedRuntimeConfig);
   const log = createLogger();
   installConsoleLogger(log);
 
@@ -408,7 +651,11 @@ app.whenReady().then(async () => {
     const warnings = shortcutRegistrationReport.issues.map(toSaveWarning);
     console.warn('[shortcuts] startup registration warnings', warnings);
   }
-  console.log('[ocr] active mode', cfg?.ocr?.mode || 'llm_vision');
+  console.log('[runtime] active providers', {
+    stt: cfg?.providers?.stt?.activeProviderId,
+    llm: cfg?.providers?.llm?.activeProviderId,
+    ocr: cfg?.providers?.ocr?.activeProviderId
+  });
   if (cfg.useWorker) {
     ensureWorker();
     if (cfg.workerWarmup) warmupWorker();
@@ -420,6 +667,7 @@ app.on('window-all-closed', (event: any) => event.preventDefault());
 app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   killWorker();
+  void shutdownRuntimeServices();
 });
 
 app.on('activate', () => {
