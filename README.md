@@ -5,10 +5,11 @@ A system‑tray transcription app built with Electron. Hold a hotkey to record y
 ## Features
 - System tray app (no main window required)
 - Press‑to‑talk / hold‑to‑talk hotkeys
-- Transcription engines: WhisperX, OpenAI Whisper, or faster‑whisper
+- Unified provider runtime for STT/LLM/OCR (local + remote adapters)
 - Prompt + dictionary biasing, plus output‑time corrections
 - Worker mode keeps the model warm (faster after first load)
 - Cross‑platform paste fallback (clipboard, wtype/xdotool/robotjs)
+- Provider catalog installer jobs (install/update/remove/use-existing)
 
 ## Quick Start (Dev)
 
@@ -34,22 +35,22 @@ isn't typically used during development.)
 
 Open the tray menu → **Settings** to configure engine, model, prompt, dictionary, and paste behavior.
 
-## Configuration
+## Configuration (v3)
 Config file is stored in Electron user data:
 - Linux: `~/.config/TrayTranscriber/config.json`
 - macOS: `~/Library/Application Support/TrayTranscriber/config.json`
 
-Key options (not exhaustive):
-- `asrEngine`: `"whisperx" | "whisper" | "faster-whisper"`
-- `model`: `tiny | base | small | medium | large`
-- `device`: `default | cpu | gpu`
-- `pasteMode`: `clipboard | paste`
-- `dictionary`: list of `{ term, description }`
-- `dictionaryCorrections`: list of `{ from, to }` (output replacements)
-- `prompt`, `promptMode`, `includeDictionaryInPrompt`
-- `useWorker`: keep a background Python worker warm
-- `workerTransport`: `"http" | "stdio"` (default: `stdio`)
-- `pythonPath`: override Python path (dev)
+Important:
+- config schema is now `configVersion: 3` and resets older configs.
+- provider-centric keys are under:
+  - `providers.stt.activeProviderId`, `providers.stt.profiles[]`
+  - `providers.llm.activeProviderId`, `providers.llm.profiles[]`
+  - `providers.ocr.activeProviderId`, `providers.ocr.profiles[]`
+- installer and runtime API:
+  - `installer.installRoot`
+  - `installer.updateChecks.enabled`, `installer.updateChecks.intervalHours`
+  - `runtimeApi.enabled`, `runtimeApi.transport`, `runtimeApi.host`, `runtimeApi.port`, `runtimeApi.authRequired`
+- compatibility keys still exist for legacy internals (`asrEngine`, `model`, worker flags), but provider profiles are source-of-truth.
 
 ### LLM Assistant
 - `assistantName`: spoken trigger words (e.g. "AI Assistant"). If the transcript begins with this name, the remainder is sent to the configured LLM instead of being pasted.
@@ -71,21 +72,21 @@ Example voice command:
 - **Dictionary** entries are added to the prompt to bias recognition.
 - **Preferred spellings** (corrections) are applied after transcription as replacements.
 
-## Engines
-### WhisperX
-Uses `python -m whisperx` by default (CLI), or the worker if enabled.
+## Providers
+### STT
+- Local adapters: `stt.local.whisperx`, `stt.local.whisper`, `stt.local.faster_whisper`
+- Remote adapters: `stt.remote.openai_compatible`, `stt.remote.deepgram`, `stt.remote.google`
 
-### Whisper (OpenAI)
-Runs via the worker. Requires:
-```bash
-pip install -U openai-whisper
-```
+### LLM
+- `llm.openai_compatible`
+- `llm.ollama`
+- `llm.lmstudio`
 
-### faster‑whisper
-Runs via the worker. Requires:
-```bash
-pip install -U faster-whisper
-```
+### OCR
+- `ocr.llm_vision`
+- `ocr.local_tesseract`
+
+Manage active providers and profiles in **Settings → Provider Catalog / Provider Profiles**.
 
 ## Worker
 When `useWorker: true`, the app starts `python/worker.py` and keeps models loaded between requests.
@@ -93,6 +94,18 @@ When `useWorker: true`, the app starts `python/worker.py` and keeps models loade
 Transport options:
 - `http` (default): worker listens on `workerHost:workerPort`.
 - `stdio`: worker communicates over stdin/stdout (no HTTP server).
+
+## Local Runtime API
+Optional local API server, controlled via `runtimeApi.*`:
+- `GET /v1/providers`
+- `GET /v1/providers/:id/status`
+- `POST /v1/stt/transcribe`
+- `POST /v1/llm/respond`
+- `POST /v1/ocr/extract`
+- `POST /v1/install/jobs`
+- `GET /v1/install/jobs/:jobId`
+
+When `runtimeApi.authRequired: true`, requests must include `Authorization: Bearer <session-token>`.
 
 ## Bundled Build (Linux/macOS)
 

@@ -335,11 +335,11 @@ export default function HistoryPage() {
               <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm text-white/80 leading-relaxed whitespace-pre-wrap min-h-[200px]">
                 {selectedEntry.content || 'No details available.'}
               </div>
-              {assistantResponse && (
+              {/* {assistantResponse && (
                 <div className="rounded-2xl border border-emerald-500/40 bg-emerald-900/60 p-3 text-sm text-emerald-50">
                   <span className="font-semibold text-emerald-100">Assistant response:</span> {String(assistantResponse)}
                 </div>
-              )}
+              )} */}
               {metadataEntries.length > 0 && (
                 <div className="space-y-2 text-xs text-white/70">
                   <p className="font-semibold text-white">Metadata</p>

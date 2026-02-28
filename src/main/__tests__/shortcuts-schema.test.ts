@@ -127,6 +127,36 @@ describe('shortcut schema validation', () => {
     expect(validation.errors.some((err) => err.code === 'MULTIPLE_RECORDING_SHORTCUTS')).toBe(true);
   });
 
+  it('allows a recording shortcut with follow-up non-recording steps', () => {
+    const validation = validateShortcuts([
+      {
+        id: 'recording-main',
+        label: 'Recording',
+        enabled: true,
+        shortcut: 'CommandOrControl+Shift+Space',
+        steps: [{ stepType: 'record_hold_to_talk' }, { stepType: 'output_text' }]
+      }
+    ] as any);
+
+    expect(validation.ok).toBe(true);
+    expect(validation.errors.some((err) => err.code === 'RECORDING_PIPELINE_INVALID')).toBe(false);
+  });
+
+  it('rejects recording shortcuts that contain more than one recording step', () => {
+    const validation = validateShortcuts([
+      {
+        id: 'recording-main',
+        label: 'Recording',
+        enabled: true,
+        shortcut: 'CommandOrControl+Shift+Space',
+        steps: [{ stepType: 'record_hold_to_talk' }, { stepType: 'record_toggle' }, { stepType: 'output_text' }]
+      }
+    ] as any);
+
+    expect(validation.ok).toBe(false);
+    expect(validation.errors.some((err) => err.code === 'RECORDING_PIPELINE_INVALID')).toBe(true);
+  });
+
   it('rejects OCR provider bindings that do not match active OCR mode', () => {
     const normalized = normalizeShortcutConfig({
       ocr: { mode: 'llm_vision' },

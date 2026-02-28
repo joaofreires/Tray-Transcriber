@@ -1,14 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import SettingsPage from './settings/SettingsPage';
 import DictionaryPage from './dictionary/DictionaryPage';
-import LLMAssistantPage from './assistant/LLMAssistantPage';
 import ShortcutsPage from './shortcuts/ShortcutsPage';
 import HistoryPage from './history/HistoryPage';
 import ThemeToggle from './components/ThemeToggle';
 import { useThemeMode } from './theme/useThemeMode';
 
 type AppTab = {
-  id: 'dashboard' | 'dictionary' | 'llm-assistant' | 'shortcuts' | 'history' | 'agents' | 'integrations' | 'settings';
+  id: 'dashboard' | 'dictionary' | 'shortcuts' | 'history' | 'agents' | 'integrations' | 'settings';
   title: string;
   subtitle: string;
   status?: 'ready' | 'coming-soon';
@@ -17,11 +16,10 @@ type AppTab = {
 const APP_TABS: AppTab[] = [
   { id: 'dashboard', title: 'Workspace', subtitle: 'Record, transcribe, and assist', status: 'ready' },
   { id: 'dictionary', title: 'Dictionary', subtitle: 'Terms and correction mappings', status: 'ready' },
-  { id: 'llm-assistant', title: 'LLM Assistant', subtitle: 'AI assistant model settings', status: 'ready' },
   { id: 'shortcuts', title: 'Shortcuts', subtitle: 'Hotkeys, pipelines, and OCR-ready actions', status: 'ready' },
   { id: 'history', title: 'History', subtitle: 'Past transcripts and exports', status: 'ready' },
-  { id: 'agents', title: 'AI Agents', subtitle: 'Prompt flows and task assistants', status: 'coming-soon' },
-  { id: 'integrations', title: 'Integrations', subtitle: 'Connect external APIs and tools', status: 'coming-soon' },
+  // { id: 'agents', title: 'AI Agents', subtitle: 'Prompt flows and task assistants', status: 'coming-soon' },
+  // { id: 'integrations', title: 'Integrations', subtitle: 'Connect external APIs and tools', status: 'coming-soon' },
   { id: 'settings', title: 'Settings', subtitle: 'Device, model and app preferences', status: 'ready' }
 ];
 
@@ -401,10 +399,6 @@ export default function App() {
             </div>
           </div>
           <div className="mt-6 space-y-3">
-            <h1 className="text-3xl font-semibold leading-tight text-white sm:text-4xl">All your conversations, surfaced.</h1>
-            <p className="text-sm text-white/70">
-              Keep your transcripts, assistant replies, and integrations in one organized workspace.
-            </p>
             <div className="flex flex-wrap gap-3">
               <button
                 type="button"
@@ -425,11 +419,11 @@ export default function App() {
         </header>
 
         <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-          <aside className="hidden md:block">
+          <aside className="hidden md:sticky md:top-6 md:block md:self-start">
             <div className="rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-2xl backdrop-blur-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.4em] text-white/60">Navigation</p>
               <p className="text-[11px] text-white/50">Pick a workspace</p>
-              <div className="mt-4">
+              <div className="mt-4 max-h-[calc(100vh-13rem)] overflow-y-auto pr-1">
                 <NavList activeTab={activeTab} onTabSelect={setActiveTab} />
               </div>
             </div>
@@ -462,11 +456,6 @@ export default function App() {
                 <SettingsPage />
               </TabSurface>
             )}
-            {currentTab.id === 'llm-assistant' && (
-              <TabSurface title="LLM Assistant" description="AI assistant model behaviors">
-                <LLMAssistantPage />
-              </TabSurface>
-            )}
             {currentTab.id === 'shortcuts' && (
               <TabSurface title="Shortcuts" description="Hotkeys, pipelines, and OCR-ready actions">
                 <ShortcutsPage />
@@ -482,7 +471,7 @@ export default function App() {
         {drawerOpen && (
           <div className="fixed inset-0 z-50 flex">
             <div className="absolute inset-0 bg-slate-950/80" onClick={closeDrawer} />
-            <aside className="relative z-10 w-72 space-y-4 rounded-[28px] border border-white/10 bg-slate-900/90 p-5 shadow-2xl">
+            <aside className="relative z-10 h-full w-72 overflow-y-auto rounded-[28px] border border-white/10 bg-slate-900/90 p-5 shadow-2xl">
               <button
                 type="button"
                 className="ml-auto inline-flex rounded-full border border-white/20 p-2 text-white transition hover:border-white/40"
@@ -494,7 +483,9 @@ export default function App() {
                 </svg>
               </button>
               <p className="text-xs font-semibold uppercase tracking-[0.4em] text-white/60">Navigation</p>
-              <NavList activeTab={activeTab} onTabSelect={setActiveTab} onSelectClose={closeDrawer} />
+              <div className="mt-4 pb-6">
+                <NavList activeTab={activeTab} onTabSelect={setActiveTab} onSelectClose={closeDrawer} />
+              </div>
             </aside>
           </div>
         )}

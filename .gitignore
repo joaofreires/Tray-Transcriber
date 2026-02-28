@@ -33,6 +33,10 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+venv/
+
+# Local provider runtimes/models (installed artifacts, not source)
+/providers/
 
 # Local config (user data is outside repo, but keep safe)
 /config.local.json
@@ -45,3 +49,5 @@ __pycache__/
 *.tmp
 *.swp
 *.codex
+
+TODO.md

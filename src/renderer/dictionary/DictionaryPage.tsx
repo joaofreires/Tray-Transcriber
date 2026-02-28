@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useConfigSync } from '../hooks/useConfigSync';
 
 type DictionaryEntry = { term: string; description: string };
 type CorrectionEntry = { from: string; to: string };
@@ -44,6 +45,13 @@ export default function DictionaryPage() {
   const [baseConfig, setBaseConfig] = useState<any>(null);
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const { hasExternalUpdate, reloadFromLatest, dismissExternalUpdate } = useConfigSync({
+    baseConfig,
+    draft,
+    setBaseConfig,
+    setDraft,
+    normalizeDraft: normalizeConfig
+  });
 
   useEffect(() => {
     (async () => {
@@ -65,23 +73,27 @@ export default function DictionaryPage() {
   const save = () => {
     if (!draft) return;
     setStatus('saving');
+    setError(null);
     (async () => {
       try {
-        const result = await window.trayTranscriber?.updateConfig?.({
-        ...(baseConfig ?? {}),
-        dictionary: draft.dictionary,
-        dictionaryCorrections: draft.dictionaryCorrections,
-        includeDictionaryInPrompt: draft.includeDictionaryInPrompt,
-        includeDictionaryDescriptions: draft.includeDictionaryDescriptions
-      });
+        const nextBase = {
+          ...(baseConfig ?? {}),
+          dictionary: draft.dictionary,
+          dictionaryCorrections: draft.dictionaryCorrections,
+          includeDictionaryInPrompt: draft.includeDictionaryInPrompt,
+          includeDictionaryDescriptions: draft.includeDictionaryDescriptions
+        };
+        const result = await window.trayTranscriber?.updateConfig?.(nextBase);
         if (!result || !result.ok) {
           const first = result && !result.ok && result.errors?.[0]?.message ? result.errors[0].message : 'Validation failed';
           setStatus('error');
           setError(first);
           return;
         }
-      setStatus('saved');
-      setTimeout(() => setStatus('idle'), 1400);
+        setBaseConfig(nextBase);
+        setDraft(normalizeConfig(nextBase));
+        setStatus('saved');
+        setTimeout(() => setStatus('idle'), 1400);
       } catch (err) {
         setStatus('error');
         setError(String(err));
@@ -106,6 +118,20 @@ export default function DictionaryPage() {
 
   return (
     <div className="space-y-6 text-white">
+      {hasExternalUpdate ? (
+        <section className="rounded-2xl border border-sky-300/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+          <p>Configuration changed elsewhere. Keep edits or reload latest.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button className="rounded-xl border border-sky-200/40 px-3 py-1 text-xs hover:bg-sky-300/20" onClick={reloadFromLatest}>
+              Reload latest
+            </button>
+            <button className="rounded-xl border border-white/20 px-3 py-1 text-xs hover:bg-white/10" onClick={dismissExternalUpdate}>
+              Dismiss
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <section className={sectionClasses}>
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold uppercase tracking-[0.4em] text-white/60">Dictionary terms</p>

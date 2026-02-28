@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import HotkeyRecorderField from '../components/HotkeyRecorderField';
 import ToggleSwitch from '../components/ToggleSwitch';
+import { useConfigSync } from '../hooks/useConfigSync';
 
 type AssistantInputMode = 'prompt_plus_selection' | 'prompt_only';
 type TextOutputMode = 'paste_then_clipboard' | 'clipboard_only';
@@ -317,6 +318,13 @@ export default function ShortcutsPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('assistant_prompt');
   const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
   const splitButtonRef = useRef<HTMLDivElement | null>(null);
+  const { hasExternalUpdate, reloadFromLatest, dismissExternalUpdate } = useConfigSync({
+    baseConfig,
+    draft,
+    setBaseConfig,
+    setDraft,
+    normalizeDraft: normalizeShortcutConfig
+  });
 
   const selectedTemplate = useMemo(
     () => TEMPLATE_OPTIONS.find((option) => option.id === selectedTemplateId) ?? TEMPLATE_OPTIONS[0],
@@ -439,13 +447,13 @@ export default function ShortcutsPage() {
     setSaveWarnings([]);
 
     try {
-      const payload = {
+      const nextBase = {
         ...(baseConfig ?? {}),
         shortcutsVersion: draft.shortcutsVersion,
         shortcutDefaults: draft.shortcutDefaults,
         shortcuts: draft.shortcuts
       };
-      const result = (await window.trayTranscriber?.updateConfig?.(payload)) as SaveConfigResult | undefined;
+      const result = (await window.trayTranscriber?.updateConfig?.(nextBase)) as SaveConfigResult | undefined;
       if (!result || !result.ok) {
         const errors = result && !result.ok && Array.isArray(result.errors) ? result.errors.map((entry) => entry.message) : ['Configuration save failed.'];
         setValidationErrors(errors);
@@ -453,6 +461,8 @@ export default function ShortcutsPage() {
         return;
       }
       const warnings = Array.isArray(result.warnings) ? result.warnings.map((warning) => warning.message) : [];
+      setBaseConfig(nextBase);
+      setDraft(normalizeShortcutConfig(nextBase));
       setSaveWarnings(warnings);
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 1400);
@@ -601,6 +611,20 @@ export default function ShortcutsPage() {
 
   return (
     <div className="space-y-5 text-white">
+      {hasExternalUpdate ? (
+        <div className="rounded-2xl border border-sky-300/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+          <p>Configuration changed elsewhere. Keep edits or reload latest.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button className="rounded-xl border border-sky-200/40 px-3 py-1 text-xs hover:bg-sky-300/20" onClick={reloadFromLatest}>
+              Reload latest
+            </button>
+            <button className="rounded-xl border border-white/20 px-3 py-1 text-xs hover:bg-white/10" onClick={dismissExternalUpdate}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-3 text-xs text-white/75">
         Active OCR mode from LLM Assistant: <span className="font-semibold text-emerald-200">{OCR_MODE_LABELS[activeOcrMode]}</span> ({activeOcrProviderId})
       </div>

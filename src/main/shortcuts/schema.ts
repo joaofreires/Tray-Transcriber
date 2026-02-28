@@ -207,10 +207,11 @@ export function validateShortcuts(shortcuts: ShortcutDefinition[]): ShortcutVali
     const first = steps[0];
     if (isRecordingStep(first)) {
       enabledRecordingShortcuts += 1;
-      if (steps.length !== 1) {
+      const recordingStepCount = steps.filter((step) => isRecordingStep(step)).length;
+      if (recordingStepCount !== 1) {
         errors.push({
           code: 'RECORDING_PIPELINE_INVALID',
-          message: `Recording shortcut "${shortcut.label}" must contain exactly one recording step.`,
+          message: `Recording shortcut "${shortcut.label}" must contain exactly one recording step (as the first step).`,
           shortcutId: shortcut.id,
           field: 'steps'
         });
