@@ -28,6 +28,68 @@ type CorrectionEntry = {
   to: string;
 };
 
+type AssistantInputMode = 'prompt_plus_selection' | 'prompt_only';
+
+type TextOutputMode = 'paste_then_clipboard' | 'clipboard_only';
+
+type OcrMode = 'llm_vision' | 'local_tesseract';
+
+type OcrSettings = {
+  mode: OcrMode;
+  vision?: {
+    systemPrompt?: string;
+    requestTimeoutMs?: number;
+  };
+  localTesseract?: {
+    binaryPath?: string;
+    language?: string;
+    extraArgs?: string;
+    timeoutMs?: number;
+  };
+};
+
+type ShortcutStep =
+  | { stepType: 'record_toggle' }
+  | { stepType: 'record_press_to_talk' }
+  | { stepType: 'record_hold_to_talk'; holdStopOnModifierRelease?: boolean }
+  | { stepType: 'screenshot_capture'; mode: 'region' | 'active_window' | 'full_screen' | 'choose_each_time' }
+  | { stepType: 'ocr_extract'; providerId?: string; languageHint?: string }
+  | { stepType: 'assistant_prompt'; prompt: string; inputMode?: AssistantInputMode }
+  | { stepType: 'output_text'; outputMode?: TextOutputMode };
+
+type ShortcutDefinition = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  shortcut: string;
+  steps: ShortcutStep[];
+};
+
+type ShortcutDefaults = {
+  assistantInputMode?: AssistantInputMode;
+  textOutputMode?: TextOutputMode;
+  ocrProviderId?: string;
+};
+
+type SaveConfigError = {
+  code: string;
+  message: string;
+  shortcutId?: string;
+  field?: string;
+  stepIndex?: number;
+};
+
+type SaveConfigWarning = {
+  code: 'SHORTCUT_REGISTER_FAILED' | 'SHORTCUT_RESERVED_OR_UNAVAILABLE';
+  message: string;
+  shortcutId?: string;
+  field?: 'shortcut';
+};
+
+type SaveConfigResult =
+  | { ok: true; warnings?: SaveConfigWarning[] }
+  | { ok: false; code: string; errors: SaveConfigError[] };
+
 type AssistantShortcut = {
   shortcut: string;
   prompt: string;
@@ -47,9 +109,9 @@ type HistoryEntry = {
 type HistorySummary = Omit<HistoryEntry, 'content'>;
 
 type AppConfig = {
-  hotkey?: string;
-  pressToTalk?: boolean;
-  holdToTalk?: boolean;
+  shortcutsVersion?: number;
+  shortcutDefaults?: ShortcutDefaults;
+  shortcuts?: ShortcutDefinition[];
   pasteMode?: string;
   asrEngine?: string;
   model?: string;
@@ -60,11 +122,13 @@ type AppConfig = {
   llmModel?: string;
   llmApiKey?: string;
   llmSystemPrompt?: string;
+  ocr?: OcrSettings;
   computeType?: string;
   batchSize?: number;
   noAlign?: boolean;
   dictionary?: DictionaryEntry[];
   dictionaryCorrections?: CorrectionEntry[];
+  // legacy compatibility only
   assistantShortcuts?: AssistantShortcut[];
   includeDictionaryInPrompt?: boolean;
   includeDictionaryDescriptions?: boolean;
@@ -91,8 +155,9 @@ type TrayTranscriberApi = {
   notifyRecordingComplete: (data: RecordingCompletePayload) => void;
   setRecordingState: (payload: RecordingStatePayload) => void;
   updateTrayIcon: () => void;
-  updateConfig: (config: AppConfig) => void;
+  updateConfig: (config: AppConfig) => Promise<SaveConfigResult>;
   getConfig: () => Promise<AppConfig>;
+  onCursorBusy: (cb: (flag: boolean) => void) => (() => void) | undefined;
   log: (message: string, data?: unknown) => void;
   onHistoryUpdated: (cb: () => void) => (() => void) | undefined;
   getHistorySummaries: (opts?: {

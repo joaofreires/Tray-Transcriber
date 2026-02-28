@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('trayTranscriber', {
   notifyRecordingComplete: (data) => ipcRenderer.send('recording-complete', data),
   setRecordingState: (payload) => ipcRenderer.send('ui-set-recording-state', payload),
   updateTrayIcon: () => ipcRenderer.send('ui-update-tray-icon'),
-  updateConfig: (config) => ipcRenderer.send('config-updated', config),
+  updateConfig: (config) => ipcRenderer.invoke('config-save', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   onCursorBusy: (cb) => {
     const handler = (_event, flag) => cb(flag);

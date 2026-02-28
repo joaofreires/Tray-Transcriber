@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import SettingsPage from './settings/SettingsPage';
 import DictionaryPage from './dictionary/DictionaryPage';
 import LLMAssistantPage from './assistant/LLMAssistantPage';
+import ShortcutsPage from './shortcuts/ShortcutsPage';
 import HistoryPage from './history/HistoryPage';
 import ThemeToggle from './components/ThemeToggle';
 import { useThemeMode } from './theme/useThemeMode';
 
 type AppTab = {
-  id: 'dashboard' | 'dictionary' | 'llm-assistant' | 'history' | 'agents' | 'integrations' | 'settings';
+  id: 'dashboard' | 'dictionary' | 'llm-assistant' | 'shortcuts' | 'history' | 'agents' | 'integrations' | 'settings';
   title: string;
   subtitle: string;
   status?: 'ready' | 'coming-soon';
@@ -16,7 +17,8 @@ type AppTab = {
 const APP_TABS: AppTab[] = [
   { id: 'dashboard', title: 'Workspace', subtitle: 'Record, transcribe, and assist', status: 'ready' },
   { id: 'dictionary', title: 'Dictionary', subtitle: 'Terms and correction mappings', status: 'ready' },
-  { id: 'llm-assistant', title: 'LLM Assistant', subtitle: 'AI assistant & shortcuts', status: 'ready' },
+  { id: 'llm-assistant', title: 'LLM Assistant', subtitle: 'AI assistant model settings', status: 'ready' },
+  { id: 'shortcuts', title: 'Shortcuts', subtitle: 'Hotkeys, pipelines, and OCR-ready actions', status: 'ready' },
   { id: 'history', title: 'History', subtitle: 'Past transcripts and exports', status: 'ready' },
   { id: 'agents', title: 'AI Agents', subtitle: 'Prompt flows and task assistants', status: 'coming-soon' },
   { id: 'integrations', title: 'Integrations', subtitle: 'Connect external APIs and tools', status: 'coming-soon' },
@@ -461,8 +463,13 @@ export default function App() {
               </TabSurface>
             )}
             {currentTab.id === 'llm-assistant' && (
-              <TabSurface title="LLM Assistant" description="AI assistant & shortcut behaviors">
+              <TabSurface title="LLM Assistant" description="AI assistant model behaviors">
                 <LLMAssistantPage />
+              </TabSurface>
+            )}
+            {currentTab.id === 'shortcuts' && (
+              <TabSurface title="Shortcuts" description="Hotkeys, pipelines, and OCR-ready actions">
+                <ShortcutsPage />
               </TabSurface>
             )}
             {currentTab.id === 'history' && <HistoryPage />}

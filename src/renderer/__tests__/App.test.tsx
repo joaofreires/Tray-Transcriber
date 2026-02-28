@@ -8,6 +8,7 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByText(/Tray Transcriber/i)).toBeDefined();
     expect(screen.getByRole('button', { name: /workspace record, transcribe, and assist/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /shortcuts hotkeys, pipelines, and ocr-ready actions/i })).toBeDefined();
     expect(screen.getByRole('button', { name: /settings device, model and app preferences/i })).toBeDefined();
   });
 });

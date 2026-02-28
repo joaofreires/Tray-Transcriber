@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import {
   initElectron, setAPP_ROOT, setMainDirname, setConfig, setFetch,
@@ -14,11 +15,15 @@ import { loadConfig, saveConfig, getConfigPath } from './src/main/config-manager
 import { createLogger, installConsoleLogger } from './src/main/logger.js';
 import { buildTrayIcon, updateTrayIcon, setTrayBusy, loadBusyFrames } from './src/main/tray-manager.js';
 import { createWindow, createConfigWindow, reloadAllWindows } from './src/main/windows.js';
-import { initHotkeys, registerHotkey, learnHoldHotkey, toggleHoldToTalk } from './src/main/hotkeys.js';
+import { initHotkeys } from './src/main/hotkeys.js';
 import { ensureWorker, warmupWorker, restartWorker, runWhisperX, fetchWorkerStatus, killWorker } from './src/main/worker-manager.js';
-import { handleAssistant, handleAssistantShortcut } from './src/main/assistant.js';
+import { handleAssistant } from './src/main/assistant.js';
 import { tryPaste } from './src/main/paste.js';
 import { normalizeTranscript } from './src/main/transcript.js';
+import { registerShortcutHandlers } from './src/main/shortcuts/registry.js';
+import { normalizeShortcutConfig } from './src/main/shortcuts/schema.js';
+import { normalizeOcrSettings } from './src/main/ocr-schema.js';
+import { normalizeLlmHost } from './src/main/llm-api.js';
 import {
   initHistoryStore,
   recordTranscriptEntry,
@@ -76,8 +81,6 @@ function updateTrayMenu(): void {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: isRecording ? 'Stop Recording' : 'Start Recording', click: () => setRecording(undefined) },
-    { label: 'Hold-to-Talk Mode', type: 'checkbox', checked: !!config?.holdToTalk, click: () => toggleHoldToTalk() },
-    { label: 'Learn Hold-to-Talk Hotkey', click: () => learnHoldHotkey() },
     { type: 'separator' },
     { label: 'Settings', click: () => createConfigWindow() },
     { label: 'Worker Status (log)', click: () => fetchWorkerStatus('menu') },
@@ -144,7 +147,14 @@ async function processTranscribeQueue(): Promise<void> {
         }
       });
       if (!assistantResponse) {
-        if (!tryPaste(text)) clipboard.writeText(text);
+        const pasteResult = await tryPaste(text);
+        if (!pasteResult.ok) {
+          console.warn('[transcribe] auto-paste failed, keeping clipboard only', {
+            method: pasteResult.method,
+            reason: pasteResult.reason
+          });
+          clipboard.writeText(text);
+        }
       }
     }
   } catch (err) {
@@ -213,28 +223,106 @@ ipcMain.on('ui-set-recording-state', (_event: any, payload: any) => {
 
 ipcMain.on('ui-update-tray-icon', () => updateTrayIcon());
 
-ipcMain.on('config-updated', (_event: any, newConfig: any) => {
-  Object.assign(config, newConfig);
+type SaveConfigWarning = {
+  code: 'SHORTCUT_REGISTER_FAILED' | 'SHORTCUT_RESERVED_OR_UNAVAILABLE';
+  message: string;
+  shortcutId?: string;
+  field?: 'shortcut';
+};
+
+type SaveConfigResult =
+  | { ok: true; warnings?: SaveConfigWarning[] }
+  | { ok: false; code: string; errors: any[] };
+
+const HOT_RELOAD_SAFE_CONFIG_KEYS = new Set(['shortcutsVersion', 'shortcutDefaults', 'shortcuts', 'ocr']);
+
+function getChangedConfigKeys(prevConfig: Record<string, unknown>, nextConfig: Record<string, unknown>): string[] {
+  const keys = new Set<string>([...Object.keys(prevConfig || {}), ...Object.keys(nextConfig || {})]);
+  const changed: string[] = [];
+  for (const key of keys) {
+    if (!isDeepStrictEqual(prevConfig?.[key], nextConfig?.[key])) {
+      changed.push(key);
+    }
+  }
+  return changed;
+}
+
+function isShortcutOnlyUpdate(changedKeys: string[]): boolean {
+  return changedKeys.length > 0 && changedKeys.every((key) => HOT_RELOAD_SAFE_CONFIG_KEYS.has(key));
+}
+
+function notifyCursorBusyState(): void {
+  if (!getMainState().trayBusy) return;
+  const { win, configWin } = getMainState();
+  const flag = !!config.cursorBusy;
+  [win, configWin].forEach((w) => {
+    if (w && !w.isDestroyed()) w.webContents.send('cursor-busy', flag);
+  });
+}
+
+function toSaveWarning(issue: { code: string; message: string; shortcutId?: string }): SaveConfigWarning {
+  return {
+    code: issue.code === 'LIKELY_OS_RESERVED' ? 'SHORTCUT_RESERVED_OR_UNAVAILABLE' : 'SHORTCUT_REGISTER_FAILED',
+    message: issue.message,
+    shortcutId: issue.shortcutId,
+    field: 'shortcut'
+  };
+}
+
+function applyRuntimeConfigUpdate(newConfig: any): SaveConfigResult {
+  const previousConfig = { ...(config || {}) };
+  const merged = {
+    ...(config || {}),
+    ...(newConfig || {}),
+    llmEndpoint: normalizeLlmHost(newConfig?.llmEndpoint ?? config?.llmEndpoint),
+    ocr: normalizeOcrSettings(newConfig?.ocr ?? config?.ocr)
+  };
+  const normalized = normalizeShortcutConfig(merged);
+  normalized.normalizedConfig.ocr = normalizeOcrSettings((normalized.normalizedConfig as any).ocr);
+  if (!normalized.validation.ok) {
+    return {
+      ok: false,
+      code: 'VALIDATION_FAILED',
+      errors: normalized.validation.errors
+    };
+  }
+
+  const nextConfig = normalized.normalizedConfig;
+  const changedKeys = getChangedConfigKeys(previousConfig as Record<string, unknown>, nextConfig as Record<string, unknown>);
+  const shortcutOnlyUpdate = isShortcutOnlyUpdate(changedKeys);
+
+  for (const key of Object.keys(config || {})) {
+    if (!(key in nextConfig)) delete config[key];
+  }
+  Object.assign(config, nextConfig);
   saveConfig(config);
   const log = createLogger();
   installConsoleLogger(log);
-  registerHotkey();
+  const shortcutRegistrationReport = registerShortcutHandlers(config as any);
   updateTrayMenu();
-  restartWorker();
-  reloadAllWindows();
+  if (!shortcutOnlyUpdate && changedKeys.length > 0) {
+    restartWorker();
+    reloadAllWindows();
+  } else if (shortcutOnlyUpdate) {
+    console.log('[config] applied hot-reload-safe update without window reload');
+  }
+  notifyCursorBusyState();
+  const warnings = shortcutRegistrationReport.issues.map(toSaveWarning);
+  return warnings.length ? { ok: true, warnings } : { ok: true };
+}
 
-  // if the cursorBusy preference is now enabled and we happen to already be
-  // in a busy state, make sure existing renderer windows know so they can set
-  // the busy cursor immediately.
-  // propagate busy cursor state based on the *new* config value; this
-  // will send `true` if both settings and current busy state are true, or
-  // `false` if the preference was just disabled while we were busy.
-  if (getMainState().trayBusy) {
-    const { win, configWin } = getMainState();
-    const flag = !!config.cursorBusy;
-    [win, configWin].forEach((w) => {
-      if (w && !w.isDestroyed()) w.webContents.send('cursor-busy', flag);
-    });
+ipcMain.handle('config-save', async (_event: any, newConfig: any) => {
+  return applyRuntimeConfigUpdate(newConfig);
+});
+
+ipcMain.on('config-updated', (_event: any, newConfig: any) => {
+  const result = applyRuntimeConfigUpdate(newConfig);
+  if (!result.ok) {
+    console.error('[config] rejected legacy config-updated payload', (result as any).errors || []);
+    return;
+  }
+  if (Array.isArray(result.warnings) && result.warnings.length) {
+    console.warn('[config] applied with shortcut registration warnings', result.warnings);
   }
 });
 
@@ -302,7 +390,7 @@ app.whenReady().then(async () => {
   await initHistoryStore();
   setHistoryUpdateHook(broadcastHistoryUpdated);
 
-  initHotkeys({ setRecording, updateTrayMenu, handleAssistantShortcut });
+  initHotkeys({ setRecording, updateTrayMenu });
 
   createWindow();
   if (process.platform === 'darwin') app.dock.hide();
@@ -315,7 +403,12 @@ app.whenReady().then(async () => {
   updateTrayIcon();
   updateTrayMenu();
 
-  registerHotkey();
+  const shortcutRegistrationReport = registerShortcutHandlers(cfg as any);
+  if (shortcutRegistrationReport.issues.length) {
+    const warnings = shortcutRegistrationReport.issues.map(toSaveWarning);
+    console.warn('[shortcuts] startup registration warnings', warnings);
+  }
+  console.log('[ocr] active mode', cfg?.ocr?.mode || 'llm_vision');
   if (cfg.useWorker) {
     ensureWorker();
     if (cfg.workerWarmup) warmupWorker();
