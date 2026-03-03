@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { fetchMock } = vi.hoisted(() => ({
-  fetchMock: vi.fn()
-}));
+const { fetchMock, ctxConfig } = vi.hoisted(() => {
+  return {
+    fetchMock: vi.fn(),
+    ctxConfig: { llmApiKey: '' }
+  };
+});
 
 vi.mock('../ctx.js', () => ({
-  fetchFn: fetchMock
+  fetchFn: fetchMock,
+  config: ctxConfig
 }));
 
 import { createOpenAiCompatibleLlmProvider } from '../runtime/providers/llm-openai-compatible.js';
@@ -19,6 +23,7 @@ function makeSecrets(value = '') {
 describe('OpenAI-compatible LLM provider', () => {
   beforeEach(() => {
     fetchMock.mockReset();
+    ctxConfig.llmApiKey = '';
     delete process.env.OPENAI_API_KEY;
   });
 
@@ -161,6 +166,34 @@ describe('OpenAI-compatible LLM provider', () => {
     expect(fetchMock.mock.calls[0][1]?.headers?.Authorization).toBe('Bearer legacy-key');
   });
 
+  it('treats profile secretRef as raw API key when key-like value is pasted directly', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: 'remote inline key ok' })
+    });
+
+    const provider = createOpenAiCompatibleLlmProvider(
+      'llm.openai_compatible',
+      'OpenAI-compatible LLM',
+      'https://api.openai.com'
+    )(makeSecrets(''));
+
+    const text = await provider.respond({
+      prompt: 'hello',
+      profile: {
+        id: 'p3c',
+        providerId: 'llm.openai_compatible',
+        label: 'Remote',
+        endpoint: 'https://api.openai.com',
+        model: 'gpt-4o-mini',
+        secretRef: 'sk-inline-api-key'
+      }
+    } as any);
+
+    expect(text.text).toBe('remote inline key ok');
+    expect(fetchMock.mock.calls[0][1]?.headers?.Authorization).toBe('Bearer sk-inline-api-key');
+  });
+
   it('uses profile endpoint/model/systemPrompt as source of truth', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
@@ -192,5 +225,33 @@ describe('OpenAI-compatible LLM provider', () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body || '{}'));
     expect(body.model).toBe('local-model');
     expect(body.instructions).toBe('profile system prompt');
+  });
+
+  it('falls back to legacy config llmApiKey when secret store is empty', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: 'legacy config ok' })
+    });
+    ctxConfig.llmApiKey = 'legacy-config-key';
+
+    const provider = createOpenAiCompatibleLlmProvider(
+      'llm.openai_compatible',
+      'OpenAI-compatible LLM',
+      'https://api.openai.com'
+    )(makeSecrets(''));
+
+    const text = await provider.respond({
+      prompt: 'hello',
+      profile: {
+        id: 'p5',
+        providerId: 'llm.openai_compatible',
+        label: 'Remote',
+        endpoint: 'https://api.openai.com',
+        model: 'gpt-4o-mini'
+      }
+    } as any);
+
+    expect(text.text).toBe('legacy config ok');
+    expect(fetchMock.mock.calls[0][1]?.headers?.Authorization).toBe('Bearer legacy-config-key');
   });
 });

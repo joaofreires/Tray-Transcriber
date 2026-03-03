@@ -56,7 +56,7 @@ Important:
 - `assistantName`: spoken trigger words (e.g. "AI Assistant"). If the transcript begins with this name, the remainder is sent to the configured LLM instead of being pasted.
 - `llmEndpoint`: host/base URL for an OpenAI-compatible API (for example `https://api.openai.com` or `http://localhost:1234`). The app calls `/v1/responses`.
 - `llmModel`: model name to request (default `gpt-5-nano`).
-- `llmApiKey`: optional API key; if empty the `OPENAI_API_KEY` environment variable is used.
+- `llmApiKey`: optional API key; if empty the `OPENAI_API_KEY` environment variable is used. The runtime still honors this legacy field (from the assistant settings or `config.json`) as a fallback for the OpenAI-compatible provider whenever no secret or env var is configured.
 
 When the assistant is triggered and there is text selected in the target application, the selected text is appended to the prompt. The LLM response will replace the selection (or simply be pasted if nothing was selected).
 
