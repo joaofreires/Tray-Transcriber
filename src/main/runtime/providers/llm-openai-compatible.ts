@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { fetchFn } from '../../ctx.js';
+import { config, fetchFn } from '../../ctx.js';
 import {
   extractTextDeltaFromLlmStreamEvent,
   extractTextFromLlmResponse,
@@ -76,6 +76,13 @@ function isLikelyLocalEndpoint(endpoint: string): boolean {
   }
 }
 
+function looksLikeInlineApiKey(value: string): boolean {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return false;
+  // Compatibility fallback for users who paste the key directly into "Secret Ref".
+  return /^sk[-_]/i.test(trimmed) || /^rk[-_]/i.test(trimmed);
+}
+
 export function createOpenAiCompatibleLlmProvider(providerId: 'llm.openai_compatible' | 'llm.lmstudio', displayName: string, fallbackEndpoint: string): (secrets: SecretsService) => LlmProvider {
   return (secrets: SecretsService): LlmProvider => ({
     descriptor: {
@@ -105,11 +112,23 @@ export function createOpenAiCompatibleLlmProvider(providerId: 'llm.openai_compat
       if (!endpoint) throw new Error(`${displayName}: endpoint is required`);
       if (!model) throw new Error(`${displayName}: model is required`);
 
-      const authKey = await resolveSecretValue(secrets, {
+      let authKey = await resolveSecretValue(secrets, {
         providerId,
         secretRef: String(profile?.secretRef || ''),
         envVarNames: ['OPENAI_API_KEY']
       });
+      if (!authKey) {
+        const legacyKey = String(config?.llmApiKey || '').trim();
+        if (legacyKey) {
+          authKey = legacyKey;
+        }
+      }
+      if (!authKey) {
+        const inlineSecretCandidate = String(profile?.secretRef || '').trim();
+        if (looksLikeInlineApiKey(inlineSecretCandidate)) {
+          authKey = inlineSecretCandidate;
+        }
+      }
 
       if (providerId === 'llm.openai_compatible' && !authKey && !isLikelyLocalEndpoint(endpointInput)) {
         throw new Error('OpenAI-compatible provider requires an API key for non-local endpoints');
