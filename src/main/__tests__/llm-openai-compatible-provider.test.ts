@@ -227,6 +227,51 @@ describe('OpenAI-compatible LLM provider', () => {
     expect(body.instructions).toBe('profile system prompt');
   });
 
+  it('serializes assistant history as output_text content for responses input', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: 'history ok' })
+    });
+
+    const provider = createOpenAiCompatibleLlmProvider(
+      'llm.openai_compatible',
+      'OpenAI-compatible LLM',
+      'https://api.openai.com'
+    )(makeSecrets(''));
+
+    const text = await provider.respond({
+      messages: [
+        { role: 'user', content: 'First turn' },
+        { role: 'assistant', content: 'Previous answer' },
+        { role: 'user', content: 'Follow-up question' }
+      ],
+      profile: {
+        id: 'p4b',
+        providerId: 'llm.openai_compatible',
+        label: 'History',
+        endpoint: 'http://127.0.0.1:1234',
+        model: 'local-model'
+      }
+    } as any);
+
+    expect(text.text).toBe('history ok');
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body || '{}'));
+    expect(body.input).toEqual([
+      {
+        role: 'user',
+        content: [{ type: 'input_text', text: 'First turn' }]
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Previous answer' }]
+      },
+      {
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Follow-up question' }]
+      }
+    ]);
+  });
+
   it('falls back to legacy config llmApiKey when secret store is empty', async () => {
     fetchMock.mockResolvedValue({
       ok: true,

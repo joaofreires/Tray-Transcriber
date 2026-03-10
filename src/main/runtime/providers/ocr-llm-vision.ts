@@ -10,6 +10,12 @@ import type {
 } from '../types.js';
 import { profileOptionNumber, profileOptionString } from './common.js';
 
+function looksLikeInlineApiKey(value: string): boolean {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return false;
+  return /^sk[-_]/i.test(trimmed) || /^rk[-_]/i.test(trimmed);
+}
+
 export function createLlmVisionRuntimeProvider(secrets: SecretsService): OcrProvider {
   return {
     descriptor: {
@@ -42,6 +48,7 @@ export function createLlmVisionRuntimeProvider(secrets: SecretsService): OcrProv
         secretRef: String(profile?.secretRef || '').trim(),
         envVarNames: ['OPENAI_API_KEY']
       });
+      const authKey = key || (looksLikeInlineApiKey(String(profile?.secretRef || '').trim()) ? String(profile?.secretRef || '').trim() : '');
 
       const systemPrompt = profileOptionString(
         profile,
@@ -73,8 +80,8 @@ export function createLlmVisionRuntimeProvider(secrets: SecretsService): OcrProv
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(key
-              ? { Authorization: `Bearer ${key}` }
+            ...(authKey
+              ? { Authorization: `Bearer ${authKey}` }
               : {})
           },
           body: JSON.stringify(payload),
