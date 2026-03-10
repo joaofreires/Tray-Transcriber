@@ -148,4 +148,28 @@ describe('runtime LLM vision OCR provider', () => {
     const headers = fetchMock.mock.calls[0]?.[1]?.headers || {};
     expect(headers.Authorization).toBe('Bearer llm-shared-key');
   });
+
+  it('treats profile secretRef as raw API key when a key is pasted directly', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: 'inline key ok' })
+    });
+
+    const provider = createLlmVisionRuntimeProvider(makeSecrets(''));
+    const result = await provider.extractText({
+      image: Buffer.from('png-bytes'),
+      profile: {
+        id: 'ocr-inline-key',
+        providerId: 'ocr.llm_vision',
+        label: 'remote',
+        endpoint: 'https://api.openai.com',
+        model: 'gpt-4o-mini',
+        secretRef: 'sk-inline-api-key'
+      }
+    } as any);
+
+    expect(result.text).toBe('inline key ok');
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers || {};
+    expect(headers.Authorization).toBe('Bearer sk-inline-api-key');
+  });
 });
